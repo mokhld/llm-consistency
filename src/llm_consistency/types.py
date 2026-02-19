@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -244,4 +244,121 @@ class PerturbedVariant:
             variant_index=int(data["variant_index"]),
             stem=str(data["stem"]),
             options=options,
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class LLMResponse:
+    """Raw LLM response with metadata.
+
+    Captures the raw output from an LLM provider along with the extracted
+    answer and optional performance metadata.  Frozen and hashable for
+    safe use in sets and as dict keys.
+
+    Attributes:
+        question_id: Back-reference to the originating question.
+        raw_output: The complete raw text returned by the LLM.
+        extracted_answer: The parsed/extracted answer label or text.
+        model: The model identifier (e.g., ``"gpt-4o"``).
+        provider: The provider identifier (e.g., ``"openai"``).
+        latency_ms: Response latency in milliseconds, or ``None``.
+        prompt_tokens: Number of prompt tokens, or ``None``.
+        completion_tokens: Number of completion tokens, or ``None``.
+    """
+
+    question_id: str
+    raw_output: str
+    extracted_answer: str
+    model: str
+    provider: str
+    latency_ms: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary.
+
+        ``None`` optional fields are included as explicit null values.
+        """
+        return {
+            "question_id": self.question_id,
+            "raw_output": self.raw_output,
+            "extracted_answer": self.extracted_answer,
+            "model": self.model,
+            "provider": self.provider,
+            "latency_ms": self.latency_ms,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LLMResponse:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with LLMResponse field keys.
+
+        Returns:
+            A new LLMResponse instance.
+        """
+        latency_raw = data.get("latency_ms")
+        prompt_raw = data.get("prompt_tokens")
+        completion_raw = data.get("completion_tokens")
+        return cls(
+            question_id=str(data["question_id"]),
+            raw_output=str(data["raw_output"]),
+            extracted_answer=str(data["extracted_answer"]),
+            model=str(data["model"]),
+            provider=str(data["provider"]),
+            latency_ms=float(latency_raw) if latency_raw is not None else None,
+            prompt_tokens=int(prompt_raw) if prompt_raw is not None else None,
+            completion_tokens=(
+                int(completion_raw) if completion_raw is not None else None
+            ),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ScoredResponse:
+    """A scored response with correctness and score.
+
+    Captures whether a response was correct, the numeric score, and the
+    scoring method used.  Carries a ``question_id`` back-reference.
+
+    Attributes:
+        question_id: Back-reference to the originating question.
+        is_correct: Whether the response was judged correct.
+        score: Numeric score (0.0 to 1.0 typical range).
+        scoring_method: Name of the scorer that produced this result.
+    """
+
+    question_id: str
+    is_correct: bool
+    score: float
+    scoring_method: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary."""
+        return {
+            "question_id": self.question_id,
+            "is_correct": self.is_correct,
+            "score": self.score,
+            "scoring_method": self.scoring_method,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ScoredResponse:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with ScoredResponse field keys.
+
+        Returns:
+            A new ScoredResponse instance.
+        """
+        return cls(
+            question_id=str(data["question_id"]),
+            is_correct=bool(data["is_correct"]),
+            score=float(data["score"]),
+            scoring_method=str(data["scoring_method"]),
         )

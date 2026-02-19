@@ -8,11 +8,13 @@ import pytest
 
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
 from llm_consistency.types import (
+    LLMResponse,
     MCOption,
     MCQuestion,
     OpenEndedQuestion,
     PerturbationType,
     PerturbedVariant,
+    ScoredResponse,
 )
 
 # --- Exception hierarchy tests ---
@@ -353,3 +355,196 @@ class TestPerturbedVariant:
         restored = PerturbedVariant.from_dict(json.loads(json.dumps(v.to_dict())))
         assert v == restored
         assert restored.options is None
+
+
+# --- LLMResponse tests ---
+
+
+class TestLLMResponse:
+    """Tests for the LLMResponse frozen dataclass."""
+
+    def test_llm_response_construction(self) -> None:
+        """Create with all required fields; verify field access."""
+        resp = LLMResponse(
+            question_id="q1",
+            raw_output="The answer is A",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+        )
+        assert resp.question_id == "q1"
+        assert resp.raw_output == "The answer is A"
+        assert resp.extracted_answer == "A"
+        assert resp.model == "gpt-4o"
+        assert resp.provider == "openai"
+
+    def test_llm_response_optional_fields_default_none(self) -> None:
+        """Omit latency_ms, prompt_tokens, completion_tokens; all default to None."""
+        resp = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+        )
+        assert resp.latency_ms is None
+        assert resp.prompt_tokens is None
+        assert resp.completion_tokens is None
+
+    def test_llm_response_with_optional_fields(self) -> None:
+        """Create with latency_ms=150.5, prompt_tokens=100, completion_tokens=50."""
+        resp = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+            latency_ms=150.5,
+            prompt_tokens=100,
+            completion_tokens=50,
+        )
+        assert resp.latency_ms == 150.5
+        assert resp.prompt_tokens == 100
+        assert resp.completion_tokens == 50
+
+    def test_llm_response_frozen(self) -> None:
+        """Mutation raises FrozenInstanceError."""
+        resp = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+        )
+        with pytest.raises(AttributeError):
+            resp.question_id = "q2"  # type: ignore[misc]
+
+    def test_llm_response_hashable(self) -> None:
+        """hash works; equal instances have same hash."""
+        resp1 = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+        )
+        resp2 = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+        )
+        assert hash(resp1) == hash(resp2)
+        assert isinstance(hash(resp1), int)
+
+    def test_llm_response_equality_uses_all_fields(self) -> None:
+        """Two instances differing only in optional field are NOT equal."""
+        resp1 = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+            latency_ms=100.0,
+        )
+        resp2 = LLMResponse(
+            question_id="q1",
+            raw_output="output",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+            latency_ms=200.0,
+        )
+        assert resp1 != resp2
+
+    def test_llm_response_kw_only(self) -> None:
+        """Positional construction raises TypeError (must use keyword arguments)."""
+        with pytest.raises(TypeError):
+            LLMResponse("q1", "output", "A", "gpt-4o", "openai")  # type: ignore[misc]
+
+    def test_llm_response_round_trip(self) -> None:
+        """to_dict -> JSON -> from_dict -> equality (None optional fields as null)."""
+        resp = LLMResponse(
+            question_id="q1",
+            raw_output="The answer is A",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+        )
+        d = resp.to_dict()
+        # None values should be present in dict
+        assert "latency_ms" in d
+        assert d["latency_ms"] is None
+        restored = LLMResponse.from_dict(json.loads(json.dumps(d)))
+        assert resp == restored
+
+    def test_llm_response_round_trip_with_optionals(self) -> None:
+        """Same round-trip with all optional fields populated."""
+        resp = LLMResponse(
+            question_id="q1",
+            raw_output="The answer is A",
+            extracted_answer="A",
+            model="gpt-4o",
+            provider="openai",
+            latency_ms=150.5,
+            prompt_tokens=100,
+            completion_tokens=50,
+        )
+        restored = LLMResponse.from_dict(json.loads(json.dumps(resp.to_dict())))
+        assert resp == restored
+        assert restored.latency_ms == 150.5
+        assert restored.prompt_tokens == 100
+        assert restored.completion_tokens == 50
+
+
+# --- ScoredResponse tests ---
+
+
+class TestScoredResponse:
+    """Tests for the ScoredResponse frozen dataclass."""
+
+    def test_scored_response_construction(self) -> None:
+        """Create with question_id, is_correct, score, scoring_method."""
+        sr = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+        )
+        assert sr.question_id == "q1"
+        assert sr.is_correct is True
+        assert sr.score == 1.0
+        assert sr.scoring_method == "exact_match"
+
+    def test_scored_response_frozen(self) -> None:
+        """Mutation raises FrozenInstanceError."""
+        sr = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+        )
+        with pytest.raises(AttributeError):
+            sr.score = 0.5  # type: ignore[misc]
+
+    def test_scored_response_hashable(self) -> None:
+        """hash works."""
+        sr = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+        )
+        assert isinstance(hash(sr), int)
+
+    def test_scored_response_round_trip(self) -> None:
+        """to_dict -> JSON -> from_dict -> equality."""
+        sr = ScoredResponse(
+            question_id="q1",
+            is_correct=False,
+            score=0.75,
+            scoring_method="semantic_similarity",
+        )
+        restored = ScoredResponse.from_dict(json.loads(json.dumps(sr.to_dict())))
+        assert sr == restored
