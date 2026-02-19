@@ -7,8 +7,13 @@ import json
 import pytest
 
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
-from llm_consistency.types import MCOption, MCQuestion, PerturbationType
-
+from llm_consistency.types import (
+    MCOption,
+    MCQuestion,
+    OpenEndedQuestion,
+    PerturbationType,
+    PerturbedVariant,
+)
 
 # --- Exception hierarchy tests ---
 
@@ -165,7 +170,7 @@ class TestMCQuestion:
             MCOption(label="A", text="X", is_correct=True),
             MCOption(label="A", text="Y", is_correct=False),
         )
-        with pytest.raises(ValidationError, match="[Dd]uplicate"):
+        with pytest.raises(ValidationError, match=r"[Dd]uplicate"):
             MCQuestion(id="q1", stem="?", options=opts)
 
     def test_mc_question_frozen(self, valid_options) -> None:
@@ -182,9 +187,169 @@ class TestMCQuestion:
 
     def test_mc_question_round_trip(self, valid_options) -> None:
         """MCQuestion survives to_dict -> JSON -> from_dict -> equality."""
-        q = MCQuestion(
-            id="q1", stem="Capital of France?", options=valid_options
-        )
+        q = MCQuestion(id="q1", stem="Capital of France?", options=valid_options)
         restored = MCQuestion.from_dict(json.loads(json.dumps(q.to_dict())))
         assert q == restored
         assert hash(q) == hash(restored)
+
+
+# --- OpenEndedQuestion tests ---
+
+
+class TestOpenEndedQuestion:
+    """Tests for the OpenEndedQuestion frozen dataclass."""
+
+    def test_open_ended_question_construction(self) -> None:
+        """Create with id, stem, reference_answers tuple."""
+        q = OpenEndedQuestion(
+            id="oe1",
+            stem="What is the capital of France?",
+            reference_answers=("Paris", "paris"),
+        )
+        assert q.id == "oe1"
+        assert q.stem == "What is the capital of France?"
+        assert q.reference_answers == ("Paris", "paris")
+
+    def test_open_ended_question_frozen(self) -> None:
+        """Mutation raises FrozenInstanceError."""
+        q = OpenEndedQuestion(id="oe1", stem="?", reference_answers=("Paris",))
+        with pytest.raises(AttributeError):
+            q.id = "oe2"  # type: ignore[misc]
+
+    def test_open_ended_question_hashable(self) -> None:
+        """hash works, equal instances have same hash."""
+        q1 = OpenEndedQuestion(id="oe1", stem="?", reference_answers=("Paris",))
+        q2 = OpenEndedQuestion(id="oe1", stem="?", reference_answers=("Paris",))
+        assert hash(q1) == hash(q2)
+
+    def test_open_ended_question_round_trip(self) -> None:
+        """to_dict -> JSON -> from_dict -> equality."""
+        q = OpenEndedQuestion(
+            id="oe1",
+            stem="What is the capital of France?",
+            reference_answers=("Paris", "paris"),
+        )
+        restored = OpenEndedQuestion.from_dict(json.loads(json.dumps(q.to_dict())))
+        assert q == restored
+        assert hash(q) == hash(restored)
+
+    def test_open_ended_question_empty_id_rejected(self) -> None:
+        """Empty id raises ValidationError."""
+        with pytest.raises(ValidationError, match="non-empty"):
+            OpenEndedQuestion(id="", stem="?", reference_answers=("Paris",))
+
+    def test_open_ended_question_empty_stem_rejected(self) -> None:
+        """Empty stem raises ValidationError."""
+        with pytest.raises(ValidationError, match="non-empty"):
+            OpenEndedQuestion(id="oe1", stem="", reference_answers=("Paris",))
+
+
+# --- PerturbedVariant tests ---
+
+
+class TestPerturbedVariant:
+    """Tests for the PerturbedVariant frozen dataclass."""
+
+    def test_perturbed_variant_construction(self) -> None:
+        """Create with required fields."""
+        opts = (
+            MCOption(label="A", text="Paris", is_correct=True),
+            MCOption(label="B", text="London", is_correct=False),
+        )
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.OPTION_REORDER,
+            seed=42,
+            variant_index=0,
+            stem="Capital of France?",
+            options=opts,
+        )
+        assert v.original_question_id == "q1"
+        assert v.perturbation_type is PerturbationType.OPTION_REORDER
+        assert v.seed == 42
+        assert v.variant_index == 0
+        assert v.stem == "Capital of France?"
+        assert v.options == opts
+
+    def test_perturbed_variant_frozen(self) -> None:
+        """Mutation raises FrozenInstanceError."""
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.PARAPHRASE,
+            seed=42,
+            variant_index=0,
+            stem="?",
+        )
+        with pytest.raises(AttributeError):
+            v.seed = 99  # type: ignore[misc]
+
+    def test_perturbed_variant_hashable(self) -> None:
+        """hash works."""
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.FORMAT_CHANGE,
+            seed=42,
+            variant_index=0,
+            stem="?",
+        )
+        assert isinstance(hash(v), int)
+
+    def test_perturbed_variant_provenance(self) -> None:
+        """perturbation_type is PerturbationType enum, seed is int."""
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.SEPARATOR_CHANGE,
+            seed=123,
+            variant_index=1,
+            stem="?",
+        )
+        assert isinstance(v.perturbation_type, PerturbationType)
+        assert isinstance(v.seed, int)
+
+    def test_perturbed_variant_round_trip(self) -> None:
+        """to_dict -> JSON -> from_dict -> equality; enum serializes as name."""
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.INSTRUCTION_REPHRASE,
+            seed=42,
+            variant_index=2,
+            stem="Rephased question?",
+        )
+        d = v.to_dict()
+        # Verify enum serializes as UPPER_CASE name
+        assert d["perturbation_type"] == "INSTRUCTION_REPHRASE"
+        restored = PerturbedVariant.from_dict(json.loads(json.dumps(d)))
+        assert v == restored
+
+    def test_perturbed_variant_mc_with_options(self) -> None:
+        """Variant with MC options round-trips."""
+        opts = (
+            MCOption(label="A", text="Paris", is_correct=True),
+            MCOption(label="B", text="London", is_correct=False),
+        )
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.OPTION_REORDER,
+            seed=42,
+            variant_index=0,
+            stem="Capital of France?",
+            options=opts,
+        )
+        restored = PerturbedVariant.from_dict(json.loads(json.dumps(v.to_dict())))
+        assert v == restored
+        assert restored.options is not None
+        assert len(restored.options) == 2
+
+    def test_perturbed_variant_open_ended_no_options(self) -> None:
+        """Variant without options (None) round-trips."""
+        v = PerturbedVariant(
+            original_question_id="oe1",
+            perturbation_type=PerturbationType.PARAPHRASE,
+            seed=42,
+            variant_index=0,
+            stem="Open ended paraphrase?",
+            options=None,
+        )
+        restored = PerturbedVariant.from_dict(json.loads(json.dumps(v.to_dict())))
+        assert v == restored
+        assert restored.options is None

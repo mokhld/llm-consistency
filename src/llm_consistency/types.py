@@ -124,3 +124,124 @@ class MCQuestion:
         """
         options = tuple(MCOption.from_dict(o) for o in data["options"])
         return cls(id=str(data["id"]), stem=str(data["stem"]), options=options)
+
+
+@dataclass(frozen=True)
+class OpenEndedQuestion:
+    """An open-ended question with reference answers.
+
+    Validates at construction time that ``id`` and ``stem`` are non-empty.
+
+    Attributes:
+        id: Unique identifier for the question.
+        stem: The question text.
+        reference_answers: Tuple of acceptable reference answers.
+    """
+
+    id: str
+    stem: str
+    reference_answers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Validate construction-time invariants."""
+        if not self.id:
+            msg = "OpenEndedQuestion.id must be a non-empty string"
+            raise ValidationError(msg)
+        if not self.stem:
+            msg = "OpenEndedQuestion.stem must be a non-empty string"
+            raise ValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary."""
+        return {
+            "id": self.id,
+            "stem": self.stem,
+            "reference_answers": list(self.reference_answers),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OpenEndedQuestion:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with 'id', 'stem', and 'reference_answers' keys.
+
+        Returns:
+            A new OpenEndedQuestion instance.
+        """
+        return cls(
+            id=str(data["id"]),
+            stem=str(data["stem"]),
+            reference_answers=tuple(str(a) for a in data["reference_answers"]),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class PerturbedVariant:
+    """A perturbed variant of a question with full provenance.
+
+    Carries the perturbation type, seed, and variant index for
+    reproducibility analysis.  Supports both MC (with options) and
+    open-ended (options=None) variants.
+
+    Attributes:
+        original_question_id: ID of the original question this variant was
+            generated from.
+        perturbation_type: The type of perturbation applied.
+        seed: Random seed used to generate this variant (for reproducibility).
+        variant_index: Zero-indexed variant number.
+        stem: The perturbed question text.
+        options: Tuple of MCOption instances for MC variants, None for
+            open-ended variants.
+    """
+
+    original_question_id: str
+    perturbation_type: PerturbationType
+    seed: int
+    variant_index: int
+    stem: str
+    options: tuple[MCOption, ...] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary.
+
+        The ``perturbation_type`` is serialized as its UPPER_CASE name string.
+        """
+        return {
+            "original_question_id": self.original_question_id,
+            "perturbation_type": self.perturbation_type.name,
+            "seed": self.seed,
+            "variant_index": self.variant_index,
+            "stem": self.stem,
+            "options": (
+                [o.to_dict() for o in self.options]
+                if self.options is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PerturbedVariant:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with variant fields.  ``perturbation_type`` is
+                expected as an UPPER_CASE name string.
+
+        Returns:
+            A new PerturbedVariant instance.
+        """
+        raw_options = data.get("options")
+        options: tuple[MCOption, ...] | None = (
+            tuple(MCOption.from_dict(o) for o in raw_options)
+            if raw_options is not None
+            else None
+        )
+        return cls(
+            original_question_id=str(data["original_question_id"]),
+            perturbation_type=PerturbationType[data["perturbation_type"]],
+            seed=int(data["seed"]),
+            variant_index=int(data["variant_index"]),
+            stem=str(data["stem"]),
+            options=options,
+        )
