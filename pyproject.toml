@@ -109,6 +109,7 @@ disallow_untyped_defs = false
 target-version = "py311"
 line-length = 88
 src = ["src", "tests"]
+exclude = ["src/llm_consistency/_version.py"]
 
 [tool.ruff.lint]
 select = [
