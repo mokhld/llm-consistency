@@ -1,4 +1,4 @@
-"""CAT framework metrics engine (MCA, CAR, CORE).
+"""CAT framework metrics engine (MCA, CAR, CORE, AGA, Bootstrap CI).
 
 Pure functions for computing consistency and accuracy metrics from
 ``QuestionConsistencyResult`` instances.  No I/O, no side effects.
@@ -7,11 +7,12 @@ Pure functions for computing consistency and accuracy metrics from
 from __future__ import annotations
 
 import math
+import random
 from collections import Counter
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 from llm_consistency.types import QuestionConsistencyResult
 
@@ -234,3 +235,75 @@ def core_index(
     norm_dtw = normalized_dtw(ys)
 
     return aucar * norm_dtw
+
+
+def agreement_gated_accuracy(
+    results: Sequence[QuestionConsistencyResult],
+    tau_agree: float,
+) -> float:
+    """Compute accuracy gated by answer agreement.
+
+    Extension metric (not in CAT paper): mean of ``rc_correct`` among
+    questions where ``rc_agree >= tau_agree``.  Reveals stable-but-wrong
+    patterns by filtering for questions where the model consistently
+    gives the same answer.
+
+    Args:
+        results: Per-question consistency results.
+        tau_agree: Agreement threshold -- only questions with
+            ``rc_agree >= tau_agree`` are included.
+
+    Returns:
+        Mean ``rc_correct`` of qualifying questions, or 0.0 if no
+        questions pass the filter or *results* is empty.
+    """
+    if not results:
+        return 0.0
+    passing = [r for r in results if r.rc_agree >= tau_agree]
+    if not passing:
+        return 0.0
+    return sum(r.rc_correct for r in passing) / len(passing)
+
+
+def bootstrap_ci(
+    results: Sequence[QuestionConsistencyResult],
+    statistic: Callable[[Sequence[QuestionConsistencyResult]], float],
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """Compute a bootstrap percentile confidence interval.
+
+    Resamples *results* with replacement ``n_bootstrap`` times, computes
+    *statistic* on each resample, and returns the ``(lower, upper)``
+    percentile bounds.
+
+    Uses ``random.Random(seed)`` for an isolated PRNG that does not
+    affect global state.  Reproducible: same seed + same input = same
+    output.
+
+    Args:
+        results: Per-question consistency results.
+        statistic: A callable that computes a scalar metric from results.
+        n_bootstrap: Number of bootstrap resamples.
+        confidence: Confidence level (e.g. 0.95 for 95% CI).
+        seed: Random seed for reproducibility, or ``None``.
+
+    Returns:
+        ``(lower, upper)`` confidence interval bounds.
+    """
+    rng = random.Random(seed)  # noqa: S311
+    result_list = list(results)
+    n = len(result_list)
+    estimates: list[float] = []
+    for _ in range(n_bootstrap):
+        resample = rng.choices(result_list, k=n)
+        estimates.append(statistic(resample))
+    estimates.sort()
+    alpha = 1.0 - confidence
+    lower_idx = int(math.floor((alpha / 2) * n_bootstrap))
+    upper_idx = int(math.ceil((1.0 - alpha / 2) * n_bootstrap)) - 1
+    # Clamp indices
+    lower_idx = max(0, min(lower_idx, n_bootstrap - 1))
+    upper_idx = max(0, min(upper_idx, n_bootstrap - 1))
+    return (estimates[lower_idx], estimates[upper_idx])

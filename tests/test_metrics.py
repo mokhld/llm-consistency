@@ -711,13 +711,11 @@ class TestBootstrapCI:
     def test_different_seeds_different_results(self) -> None:
         """Different seeds produce different CI bounds."""
         results = [
-            _qcr("q1", 1.0),
-            _qcr("q2", 0.5),
-            _qcr("q3", 0.0),
+            _qcr(f"q{i}", rc_correct=i / 20) for i in range(21)
         ]
 
         def stat(r: list[QuestionConsistencyResult]) -> float:
-            return mca(r, threshold=0.5)
+            return sum(q.rc_correct for q in r) / len(r) if r else 0.0
 
         ci_a = bootstrap_ci(results, statistic=stat, n_bootstrap=500, seed=42)
         ci_b = bootstrap_ci(results, statistic=stat, n_bootstrap=500, seed=99)
