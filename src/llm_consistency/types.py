@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from llm_consistency._exceptions import ValidationError
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string."""
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
 
 class PerturbationType(Enum):
@@ -434,4 +440,189 @@ class QuestionConsistencyResult:
             correct_count=int(data["correct_count"]),
             answer_distribution=answer_distribution,
             scored_responses=scored_responses,
+        )
+
+
+KNOWN_SCORERS: frozenset[str] = frozenset(
+    {"exact_match", "semantic_similarity", "llm_judge"}
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class EvaluationConfig:
+    """User-facing configuration for an LLM consistency evaluation run.
+
+    Eagerly validates all fields at construction time (fail-fast).
+    Perturbation types are validated against the ``PerturbationType`` enum
+    and scorer names against ``KNOWN_SCORERS``.
+
+    Attributes:
+        model: The LLM model identifier (e.g., ``"gpt-4o"``).
+        provider: The provider identifier (e.g., ``"openai"``).
+        perturbation_types: Tuple of perturbation categories to apply.
+        scorer: Name of the scoring method (must be in ``KNOWN_SCORERS``).
+        num_variants: Number of perturbation variants per question.
+        concurrency: Maximum concurrent provider API calls.
+        max_budget_usd: Spending cap in USD, or ``None`` for unlimited.
+        mca_threshold: MCA threshold for CI pass/fail (0.0 to 1.0).
+        core_threshold: Minimum CORE score for CI pass/fail, or ``None``.
+        ci_mode: Whether to return exit code based on thresholds.
+    """
+
+    model: str
+    provider: str
+    perturbation_types: tuple[PerturbationType, ...]
+    scorer: str
+    num_variants: int = 5
+    concurrency: int = 10
+    max_budget_usd: float | None = None
+    mca_threshold: float = 1.0
+    core_threshold: float | None = None
+    ci_mode: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate construction-time invariants (eager validation)."""
+        if not self.model:
+            msg = "EvaluationConfig.model must be a non-empty string"
+            raise ValidationError(msg)
+        if not self.provider:
+            msg = "EvaluationConfig.provider must be a non-empty string"
+            raise ValidationError(msg)
+        if not self.perturbation_types:
+            msg = "EvaluationConfig.perturbation_types must be non-empty"
+            raise ValidationError(msg)
+        if self.scorer not in KNOWN_SCORERS:
+            sorted_scorers = sorted(KNOWN_SCORERS)
+            msg = (
+                f"Unknown scorer '{self.scorer}'. "
+                f"Known scorers: {sorted_scorers}"
+            )
+            raise ValidationError(msg)
+        if self.num_variants < 1:
+            msg = "EvaluationConfig.num_variants must be >= 1"
+            raise ValidationError(msg)
+        if self.concurrency < 1:
+            msg = "EvaluationConfig.concurrency must be >= 1"
+            raise ValidationError(msg)
+        if not (0.0 <= self.mca_threshold <= 1.0):
+            msg = "EvaluationConfig.mca_threshold must be between 0.0 and 1.0"
+            raise ValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary.
+
+        ``perturbation_types`` is serialized as a list of UPPER_CASE name
+        strings.
+        """
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "perturbation_types": [pt.name for pt in self.perturbation_types],
+            "scorer": self.scorer,
+            "num_variants": self.num_variants,
+            "concurrency": self.concurrency,
+            "max_budget_usd": self.max_budget_usd,
+            "mca_threshold": self.mca_threshold,
+            "core_threshold": self.core_threshold,
+            "ci_mode": self.ci_mode,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EvaluationConfig:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with EvaluationConfig field keys.
+                ``perturbation_types`` is expected as a list of UPPER_CASE
+                name strings.
+
+        Returns:
+            A new EvaluationConfig instance.
+        """
+        perturbation_types = tuple(
+            PerturbationType[name] for name in data["perturbation_types"]
+        )
+        core_raw = data.get("core_threshold")
+        budget_raw = data.get("max_budget_usd")
+        return cls(
+            model=str(data["model"]),
+            provider=str(data["provider"]),
+            perturbation_types=perturbation_types,
+            scorer=str(data["scorer"]),
+            num_variants=int(data.get("num_variants", 5)),
+            concurrency=int(data.get("concurrency", 10)),
+            max_budget_usd=float(budget_raw) if budget_raw is not None else None,
+            mca_threshold=float(data.get("mca_threshold", 1.0)),
+            core_threshold=float(core_raw) if core_raw is not None else None,
+            ci_mode=bool(data.get("ci_mode", False)),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class EvaluationReport:
+    """Complete evaluation report with configuration, results, and metadata.
+
+    Embeds the full tuple of ``QuestionConsistencyResult`` instances (not
+    just aggregate metrics) per the locked design decision.  The
+    ``created_at`` field auto-generates an ISO 8601 UTC timestamp if not
+    provided.
+
+    Attributes:
+        config: The evaluation configuration used for this run.
+        results: Full tuple of per-question consistency results.
+        total_questions: Total number of questions evaluated.
+        total_variants: Total number of perturbed variants across all
+            questions.
+        mean_rc_correct: Average correctness rate across all questions.
+        mean_rc_agree: Average agreement rate across all questions.
+        created_at: ISO 8601 timestamp of report creation.
+    """
+
+    config: EvaluationConfig
+    results: tuple[QuestionConsistencyResult, ...]
+    total_questions: int
+    total_variants: int
+    mean_rc_correct: float
+    mean_rc_agree: float
+    created_at: str = field(default_factory=_utc_now_iso)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary.
+
+        Nested ``config`` and ``results`` are recursively serialized via
+        their own ``to_dict()`` methods.
+        """
+        return {
+            "config": self.config.to_dict(),
+            "results": [r.to_dict() for r in self.results],
+            "total_questions": self.total_questions,
+            "total_variants": self.total_variants,
+            "mean_rc_correct": self.mean_rc_correct,
+            "mean_rc_agree": self.mean_rc_agree,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EvaluationReport:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with EvaluationReport field keys.  Nested
+                ``config`` and ``results`` are deserialized recursively.
+
+        Returns:
+            A new EvaluationReport instance.
+        """
+        config = EvaluationConfig.from_dict(data["config"])
+        results = tuple(
+            QuestionConsistencyResult.from_dict(r) for r in data["results"]
+        )
+        return cls(
+            config=config,
+            results=results,
+            total_questions=int(data["total_questions"]),
+            total_variants=int(data["total_variants"]),
+            mean_rc_correct=float(data["mean_rc_correct"]),
+            mean_rc_agree=float(data["mean_rc_agree"]),
+            created_at=str(data["created_at"]),
         )

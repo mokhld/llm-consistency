@@ -8,6 +8,9 @@ import pytest
 
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
 from llm_consistency.types import (
+    KNOWN_SCORERS,
+    EvaluationConfig,
+    EvaluationReport,
     LLMResponse,
     MCOption,
     MCQuestion,
@@ -739,3 +742,290 @@ class TestQuestionConsistencyResult:
         assert qcr == restored
         assert len(restored.scored_responses) == 2
         assert restored.scored_responses[0].is_correct is True
+
+
+# --- EvaluationConfig tests ---
+
+
+class TestEvaluationConfig:
+    """Tests for the EvaluationConfig frozen dataclass with eager validation."""
+
+    def test_evaluation_config_construction(self) -> None:
+        """Create with required and optional fields; verify access."""
+        cfg = EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(
+                PerturbationType.OPTION_REORDER,
+                PerturbationType.FORMAT_CHANGE,
+            ),
+            scorer="exact_match",
+        )
+        assert cfg.model == "gpt-4o"
+        assert cfg.provider == "openai"
+        assert cfg.perturbation_types == (
+            PerturbationType.OPTION_REORDER,
+            PerturbationType.FORMAT_CHANGE,
+        )
+        assert cfg.scorer == "exact_match"
+
+    def test_evaluation_config_eager_validation_invalid_scorer(self) -> None:
+        """Invalid scorer name raises ValidationError mentioning known scorers."""
+        with pytest.raises(ValidationError, match="nonexistent_scorer") as exc_info:
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="nonexistent_scorer",
+            )
+        # Should mention at least one known scorer in the error message
+        assert "exact_match" in str(exc_info.value) or "KNOWN_SCORERS" in str(
+            exc_info.value
+        )
+
+    def test_evaluation_config_valid_scorers_accepted(self) -> None:
+        """All three known scorers are accepted without error."""
+        for scorer_name in ("exact_match", "semantic_similarity", "llm_judge"):
+            cfg = EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer=scorer_name,
+            )
+            assert cfg.scorer == scorer_name
+
+    def test_evaluation_config_empty_perturbation_types(self) -> None:
+        """Empty perturbation_types tuple raises ValidationError."""
+        with pytest.raises(ValidationError, match="[Ee]mpty|[Nn]on-empty|at least"):
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(),
+                scorer="exact_match",
+            )
+
+    def test_evaluation_config_frozen(self) -> None:
+        """Mutation raises FrozenInstanceError."""
+        cfg = EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(PerturbationType.OPTION_REORDER,),
+            scorer="exact_match",
+        )
+        with pytest.raises(AttributeError):
+            cfg.model = "other"  # type: ignore[misc]
+
+    def test_evaluation_config_round_trip(self) -> None:
+        """to_dict -> JSON -> from_dict -> equality; perturbation_types as name strings."""
+        cfg = EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(
+                PerturbationType.OPTION_REORDER,
+                PerturbationType.PARAPHRASE,
+            ),
+            scorer="exact_match",
+            num_variants=10,
+            concurrency=5,
+        )
+        d = cfg.to_dict()
+        # perturbation_types should serialize as list of UPPER_CASE name strings
+        assert d["perturbation_types"] == ["OPTION_REORDER", "PARAPHRASE"]
+        restored = EvaluationConfig.from_dict(json.loads(json.dumps(d)))
+        assert cfg == restored
+
+    def test_evaluation_config_defaults(self) -> None:
+        """Verify sensible defaults for optional fields."""
+        cfg = EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(PerturbationType.OPTION_REORDER,),
+            scorer="exact_match",
+        )
+        assert cfg.num_variants == 5
+        assert cfg.concurrency == 10
+        assert cfg.max_budget_usd is None
+        assert cfg.mca_threshold == 1.0
+        assert cfg.core_threshold is None
+        assert cfg.ci_mode is False
+
+
+# --- EvaluationReport tests ---
+
+
+class TestEvaluationReport:
+    """Tests for the EvaluationReport frozen dataclass."""
+
+    @pytest.fixture()
+    def sample_config(self) -> EvaluationConfig:
+        """Return a valid EvaluationConfig."""
+        return EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(PerturbationType.OPTION_REORDER,),
+            scorer="exact_match",
+        )
+
+    @pytest.fixture()
+    def sample_results(self) -> tuple[QuestionConsistencyResult, ...]:
+        """Return a tuple of QuestionConsistencyResult for testing."""
+        sr = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+        )
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+            answer_distribution={"A": 3, "B": 2},
+            scored_responses=(sr,),
+        )
+        return (qcr,)
+
+    def test_evaluation_report_construction(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """Create with config, results, aggregate metrics, created_at."""
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        assert report.config == sample_config
+        assert report.results == sample_results
+        assert report.total_questions == 1
+        assert report.total_variants == 5
+        assert report.mean_rc_correct == 0.8
+        assert report.mean_rc_agree == 0.6
+        assert report.created_at == "2026-01-01T00:00:00+00:00"
+
+    def test_evaluation_report_embeds_full_results(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """Results field is the full tuple of QuestionConsistencyResult (not just aggregates)."""
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+        )
+        # Locked decision: full results, not aggregates
+        assert isinstance(report.results, tuple)
+        assert len(report.results) == 1
+        assert isinstance(report.results[0], QuestionConsistencyResult)
+        assert report.results[0].question_id == "q1"
+        assert report.results[0].rc_correct == 0.8
+
+    def test_evaluation_report_created_at_iso_format(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """created_at is a valid ISO 8601 string."""
+        from datetime import datetime, timezone
+
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        # Should parse without error
+        parsed = datetime.fromisoformat(report.created_at)
+        assert parsed.tzinfo is not None or "T" in report.created_at
+
+    def test_evaluation_report_created_at_auto_generated(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """Create without passing created_at; verify auto-generates valid ISO 8601."""
+        from datetime import datetime
+
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+        )
+        # Should be a valid ISO 8601 string
+        parsed = datetime.fromisoformat(report.created_at)
+        assert parsed is not None
+        assert "T" in report.created_at
+
+    def test_evaluation_report_frozen(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """Mutation raises FrozenInstanceError."""
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+        )
+        with pytest.raises(AttributeError):
+            report.total_questions = 99  # type: ignore[misc]
+
+    def test_evaluation_report_hashable(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """hash works (dict-containing QuestionConsistencyResult uses hash=False on dict fields)."""
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        assert isinstance(hash(report), int)
+
+    def test_evaluation_report_round_trip(
+        self,
+        sample_config: EvaluationConfig,
+        sample_results: tuple[QuestionConsistencyResult, ...],
+    ) -> None:
+        """to_dict -> JSON -> from_dict -> equality; full deep round-trip."""
+        report = EvaluationReport(
+            config=sample_config,
+            results=sample_results,
+            total_questions=1,
+            total_variants=5,
+            mean_rc_correct=0.8,
+            mean_rc_agree=0.6,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        d = report.to_dict()
+        json_str = json.dumps(d)
+        restored = EvaluationReport.from_dict(json.loads(json_str))
+        assert report == restored
+        # Verify nested data survived
+        assert len(restored.results) == 1
+        assert restored.results[0].scored_responses[0].is_correct is True
+        assert restored.config.model == "gpt-4o"
