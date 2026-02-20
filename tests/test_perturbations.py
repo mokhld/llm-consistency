@@ -6,6 +6,7 @@ import pytest
 
 from llm_consistency.perturbations import (
     BasePerturbation,
+    OptionReorderPerturbation,
     _reset_registry,
     get,
     list_registered,
@@ -217,3 +218,170 @@ class TestRegistry:
         assert len(list_registered()) == 2
         _reset_registry()
         assert list_registered() == []
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for OptionReorderPerturbation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def sample_question() -> MCQuestion:
+    """A 4-option question: A=Paris (correct), B=London, C=Berlin, D=Madrid."""
+    return MCQuestion(
+        id="q-capitals",
+        stem="What is the capital of France?",
+        options=(
+            MCOption(label="A", text="Paris", is_correct=True),
+            MCOption(label="B", text="London", is_correct=False),
+            MCOption(label="C", text="Berlin", is_correct=False),
+            MCOption(label="D", text="Madrid", is_correct=False),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# OptionReorderPerturbation tests
+# ---------------------------------------------------------------------------
+
+
+class TestOptionReorderCore:
+    """Core behavior tests for OptionReorderPerturbation."""
+
+    def test_option_reorder_returns_all_non_identity_permutations(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With 4 options and n=None, expect exactly 23 variants (4! - 1)."""
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        assert len(variants) == 23
+        for v in variants:
+            assert v.options is not None
+            assert len(v.options) == 4
+
+    def test_option_reorder_excludes_identity(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """No variant has options in the original order."""
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        original_texts = tuple(o.text for o in sample_question.options)
+        for v in variants:
+            assert v.options is not None
+            variant_texts = tuple(o.text for o in v.options)
+            assert variant_texts != original_texts
+
+    def test_option_reorder_label_reassignment(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Labels always match position; is_correct follows text content."""
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        for v in variants:
+            assert v.options is not None
+            labels = [o.label for o in v.options]
+            assert labels == ["A", "B", "C", "D"]
+            # The option with text "Paris" must always be correct
+            for opt in v.options:
+                if opt.text == "Paris":
+                    assert opt.is_correct is True
+                else:
+                    assert opt.is_correct is False
+
+    def test_option_reorder_correct_answer_label_changes(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """The correct answer's label appears at different positions across variants."""
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        correct_labels = set()
+        for v in variants:
+            assert v.options is not None
+            for opt in v.options:
+                if opt.is_correct:
+                    correct_labels.add(opt.label)
+        # The correct answer should NOT always be "A"
+        assert len(correct_labels) > 1
+
+
+class TestOptionReorderNSampling:
+    """Tests for N-sampling behavior."""
+
+    def test_option_reorder_n_sampling(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With n=5, expect exactly 5 variants."""
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(sample_question, seed=42, n=5)
+        assert len(variants) == 5
+
+    def test_option_reorder_n_larger_than_available(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With n=30 (exceeds 23 available), expect all 23 variants."""
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(sample_question, seed=42, n=30)
+        assert len(variants) == 23
+
+
+class TestOptionReorderSeedReproducibility:
+    """Seed reproducibility tests (PERT-08)."""
+
+    def test_option_reorder_seed_reproducibility(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Same seed + same input = identical output."""
+        pert = OptionReorderPerturbation()
+        variants_a = pert.generate_variants(sample_question, seed=42, n=5)
+        variants_b = pert.generate_variants(sample_question, seed=42, n=5)
+        assert variants_a == variants_b
+
+    def test_option_reorder_different_seeds_differ(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Different seeds produce different output."""
+        pert = OptionReorderPerturbation()
+        variants_a = pert.generate_variants(sample_question, seed=42, n=5)
+        variants_b = pert.generate_variants(sample_question, seed=99, n=5)
+        assert variants_a != variants_b
+
+
+class TestOptionReorderMetadata:
+    """Tests for perturbation type and variant metadata."""
+
+    def test_option_reorder_perturbation_type(self) -> None:
+        """OptionReorderPerturbation().perturbation_type is OPTION_REORDER."""
+        pert = OptionReorderPerturbation()
+        assert pert.perturbation_type == PerturbationType.OPTION_REORDER
+
+    def test_option_reorder_variant_metadata(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Each variant has correct provenance metadata."""
+        pert = OptionReorderPerturbation()
+        seed = 42
+        variants = pert.generate_variants(sample_question, seed=seed, n=3)
+        for i, v in enumerate(variants):
+            assert v.original_question_id == sample_question.id
+            assert v.perturbation_type == PerturbationType.OPTION_REORDER
+            assert v.seed == seed
+            assert v.variant_index == i
+            assert v.stem == sample_question.stem
+
+
+class TestOptionReorderEdgeCases:
+    """Edge case tests."""
+
+    def test_option_reorder_two_options(self) -> None:
+        """With 2 options, expect exactly 1 variant (2! - 1 = 1)."""
+        question = MCQuestion(
+            id="q-binary",
+            stem="Is the sky blue?",
+            options=(
+                MCOption(label="A", text="Yes", is_correct=True),
+                MCOption(label="B", text="No", is_correct=False),
+            ),
+        )
+        pert = OptionReorderPerturbation()
+        variants = pert.generate_variants(question, seed=0)
+        assert len(variants) == 1
