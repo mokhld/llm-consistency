@@ -292,7 +292,7 @@ def bootstrap_ci(
     Returns:
         ``(lower, upper)`` confidence interval bounds.
     """
-    rng = random.Random(seed)  # noqa: S311
+    rng = random.Random(seed)
     result_list = list(results)
     n = len(result_list)
     estimates: list[float] = []
@@ -301,8 +301,8 @@ def bootstrap_ci(
         estimates.append(statistic(resample))
     estimates.sort()
     alpha = 1.0 - confidence
-    lower_idx = int(math.floor((alpha / 2) * n_bootstrap))
-    upper_idx = int(math.ceil((1.0 - alpha / 2) * n_bootstrap)) - 1
+    lower_idx = math.floor((alpha / 2) * n_bootstrap)
+    upper_idx = math.ceil((1.0 - alpha / 2) * n_bootstrap) - 1
     # Clamp indices
     lower_idx = max(0, min(lower_idx, n_bootstrap - 1))
     upper_idx = max(0, min(upper_idx, n_bootstrap - 1))

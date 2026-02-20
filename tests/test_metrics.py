@@ -757,7 +757,7 @@ class TestPublicAPIImports:
 
     def test_all_metrics_importable(self) -> None:
         """All metric functions are importable from the llm_consistency package."""
-        from llm_consistency import (  # noqa: F401
+        from llm_consistency import (  # noqa: F401, PLC0415
             agreement_gated_accuracy,
             bootstrap_ci,
             build_question_consistency_result,
@@ -771,7 +771,7 @@ class TestPublicAPIImports:
 
     def test_metrics_in_all(self) -> None:
         """All metric function names are in __all__."""
-        import llm_consistency
+        import llm_consistency  # noqa: PLC0415
 
         all_names = llm_consistency.__all__
         metric_names = [
