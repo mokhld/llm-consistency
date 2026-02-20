@@ -241,7 +241,7 @@ class TestCARCurve:
         curve = car_curve(results)
         thresholds_out = [c for c, _ in curve]
         expected = [i / 10 for i in range(11)]
-        for actual, exp in zip(thresholds_out, expected):
+        for actual, exp in zip(thresholds_out, expected, strict=True):
             assert actual == pytest.approx(exp)
 
     def test_perfect_model_car(self) -> None:

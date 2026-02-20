@@ -56,3 +56,51 @@ def build_question_consistency_result(
         answer_distribution=answer_distribution,
         scored_responses=(),
     )
+
+
+def mca(
+    results: Sequence[QuestionConsistencyResult],
+    threshold: float,
+) -> float:
+    """Compute MCA_cat(c) -- fraction of questions with RC_correct >= c.
+
+    CAT paper Equation 4:
+        ``MCA(c) = (1/N) * sum(indicator(RC_i >= c) for i=1..N)``
+
+    Args:
+        results: Per-question consistency results.
+        threshold: Consistency threshold *c* in [0.0, 1.0].
+
+    Returns:
+        Fraction of questions meeting the threshold, or 0.0 if
+        *results* is empty.
+    """
+    if not results:
+        return 0.0
+    count = sum(1 for r in results if r.rc_correct >= threshold)
+    return count / len(results)
+
+
+def car_curve(
+    results: Sequence[QuestionConsistencyResult],
+    thresholds: Sequence[float] | None = None,
+) -> list[tuple[float, float]]:
+    """Build the CAR curve from MCA values across thresholds.
+
+    CAT paper Equation 5:
+        ``CAR = {(c_k, MCA(c_k)) | c_k in C}``
+
+    Default thresholds are 11 evenly-spaced points from 0.0 to 1.0
+    (matching IBM/cat ``consistency_resolution=10``).
+
+    Args:
+        results: Per-question consistency results.
+        thresholds: Consistency thresholds.  Defaults to
+            ``[0.0, 0.1, 0.2, ..., 1.0]``.
+
+    Returns:
+        List of ``(threshold, mca_value)`` pairs sorted by threshold.
+    """
+    if thresholds is None:
+        thresholds = [i / 10 for i in range(11)]
+    return [(c, mca(results, c)) for c in sorted(thresholds)]
