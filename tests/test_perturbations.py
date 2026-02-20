@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from llm_consistency.perturbations import (
@@ -21,14 +23,13 @@ from llm_consistency.types import (
     PerturbedVariant,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry() -> None:  # noqa: PT004
+def _clean_registry() -> None:
     """Reset the perturbation registry before and after each test."""
     _reset_registry()
     yield  # type: ignore[misc]
@@ -87,7 +88,7 @@ class TestBasePerturbationABC:
             BasePerturbation()  # type: ignore[abstract]
 
     def test_subclass_missing_generate_variants_raises(self) -> None:
-        """A subclass that does not implement generate_variants cannot be instantiated."""
+        """Subclass without generate_variants cannot be instantiated."""
 
         class _Incomplete(BasePerturbation):
             @property
@@ -98,7 +99,7 @@ class TestBasePerturbationABC:
             _Incomplete()  # type: ignore[abstract]
 
     def test_subclass_missing_perturbation_type_raises(self) -> None:
-        """A subclass that does not implement perturbation_type cannot be instantiated."""
+        """Subclass without perturbation_type cannot be instantiated."""
 
         class _Incomplete(BasePerturbation):
             def generate_variants(
@@ -428,7 +429,9 @@ class TestFormatChangeCore:
         pert = FormatChangePerturbation()
         variants = pert.generate_variants(sample_question, seed=0)
         stems = [v.stem for v in variants]
-        assert len(stems) == len(set(stems)), "All templates should produce distinct output"
+        assert len(stems) == len(set(stems)), (
+            "All templates should produce distinct output"
+        )
 
     def test_format_change_preserves_option_texts(
         self, sample_question: MCQuestion
@@ -528,7 +531,9 @@ class TestSeparatorChangeCore:
         pert = SeparatorChangePerturbation()
         variants = pert.generate_variants(sample_question, seed=0)
         stems = [v.stem for v in variants]
-        assert len(stems) == len(set(stems)), "All separators should produce distinct output"
+        assert len(stems) == len(set(stems)), (
+            "All separators should produce distinct output"
+        )
 
     def test_separator_change_preserves_option_texts(
         self, sample_question: MCQuestion
@@ -688,31 +693,26 @@ class TestPublicAPIPerturbationImports:
     """Tests for perturbation symbols in the llm_consistency public API."""
 
     def test_public_api_perturbation_imports(self) -> None:
-        """Core perturbation symbols are importable from llm_consistency."""
-        from llm_consistency import (  # type: ignore[attr-defined]
-            BasePerturbation as BP,
-            FormatChangePerturbation as FCP,
-            OptionReorderPerturbation as ORP,
-            SeparatorChangePerturbation as SCP,
-            get_perturbation,
-            list_registered_perturbations,
-            register_perturbation,
-        )
+        """Core perturbation symbols importable from llm_consistency."""
+        pkg = importlib.import_module("llm_consistency")
 
-        assert BP is BasePerturbation
-        assert ORP is OptionReorderPerturbation
-        assert FCP is FormatChangePerturbation
-        assert SCP is SeparatorChangePerturbation
-        # Registry functions should be callable
-        assert callable(register_perturbation)
-        assert callable(get_perturbation)
-        assert callable(list_registered_perturbations)
+        # Class re-exports match the module-level originals
+        assert pkg.BasePerturbation is BasePerturbation
+        assert pkg.OptionReorderPerturbation is OptionReorderPerturbation
+        assert pkg.FormatChangePerturbation is FormatChangePerturbation
+        assert (
+            pkg.SeparatorChangePerturbation
+            is SeparatorChangePerturbation
+        )
+        # Registry function aliases are callable
+        assert callable(pkg.register_perturbation)
+        assert callable(pkg.get_perturbation)
+        assert callable(pkg.list_registered_perturbations)
 
     def test_public_api_all_includes_perturbations(self) -> None:
         """All perturbation symbols appear in llm_consistency.__all__."""
-        import llm_consistency
-
-        all_symbols = llm_consistency.__all__
+        pkg = importlib.import_module("llm_consistency")
+        all_symbols: list[str] = pkg.__all__
         expected = [
             "BasePerturbation",
             "FormatChangePerturbation",
