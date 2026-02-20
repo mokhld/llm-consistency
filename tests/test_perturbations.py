@@ -6,7 +6,9 @@ import pytest
 
 from llm_consistency.perturbations import (
     BasePerturbation,
+    FormatChangePerturbation,
     OptionReorderPerturbation,
+    SeparatorChangePerturbation,
     _reset_registry,
     get,
     list_registered,
@@ -386,3 +388,203 @@ class TestOptionReorderEdgeCases:
         pert = OptionReorderPerturbation()
         variants = pert.generate_variants(question, seed=0)
         assert len(variants) == 1
+
+
+# ---------------------------------------------------------------------------
+# FormatChangePerturbation tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatChangeCore:
+    """Core behavior tests for FormatChangePerturbation."""
+
+    def test_format_change_returns_variants(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With n=None, returns at least 6 variants (one per template)."""
+        pert = FormatChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        assert len(variants) >= 6
+        for v in variants:
+            # Stem contains original stem content
+            assert "capital of France" in v.stem.lower() or "Capital of France" in v.stem
+            # All option texts present in the rendered stem
+            for opt in sample_question.options:
+                assert opt.text in v.stem
+
+    def test_format_change_templates_differ(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """All returned variant stems must be distinct from each other."""
+        pert = FormatChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        stems = [v.stem for v in variants]
+        assert len(stems) == len(set(stems)), "All templates should produce distinct output"
+
+    def test_format_change_preserves_option_texts(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Every variant contains all original option texts."""
+        pert = FormatChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        option_texts = [opt.text for opt in sample_question.options]
+        for v in variants:
+            for text in option_texts:
+                assert text in v.stem, f"Option text '{text}' missing from variant stem"
+
+
+class TestFormatChangeNSampling:
+    """N-sampling tests for FormatChangePerturbation."""
+
+    def test_format_change_n_sampling(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With n=3, returns exactly 3 variants."""
+        pert = FormatChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0, n=3)
+        assert len(variants) == 3
+
+
+class TestFormatChangeSeedReproducibility:
+    """Seed reproducibility tests for FormatChangePerturbation."""
+
+    def test_format_change_seed_reproducibility(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Same seed + same input = identical output."""
+        pert = FormatChangePerturbation()
+        variants_a = pert.generate_variants(sample_question, seed=42, n=3)
+        variants_b = pert.generate_variants(sample_question, seed=42, n=3)
+        assert variants_a == variants_b
+
+    def test_format_change_different_seeds_differ(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Different seeds produce different output (for n < total templates)."""
+        pert = FormatChangePerturbation()
+        variants_a = pert.generate_variants(sample_question, seed=42, n=3)
+        variants_b = pert.generate_variants(sample_question, seed=99, n=3)
+        assert variants_a != variants_b
+
+
+class TestFormatChangeMetadata:
+    """Tests for FormatChangePerturbation type and variant metadata."""
+
+    def test_format_change_perturbation_type(self) -> None:
+        """FormatChangePerturbation().perturbation_type is FORMAT_CHANGE."""
+        pert = FormatChangePerturbation()
+        assert pert.perturbation_type == PerturbationType.FORMAT_CHANGE
+
+    def test_format_change_variant_metadata(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Each variant has correct metadata. Options is None."""
+        pert = FormatChangePerturbation()
+        seed = 42
+        variants = pert.generate_variants(sample_question, seed=seed)
+        for i, v in enumerate(variants):
+            assert v.original_question_id == sample_question.id
+            assert v.perturbation_type == PerturbationType.FORMAT_CHANGE
+            assert v.seed == seed
+            assert v.variant_index == i
+            assert v.options is None
+
+
+# ---------------------------------------------------------------------------
+# SeparatorChangePerturbation tests
+# ---------------------------------------------------------------------------
+
+
+class TestSeparatorChangeCore:
+    """Core behavior tests for SeparatorChangePerturbation."""
+
+    def test_separator_change_returns_variants(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With n=None, returns at least 8 variants."""
+        pert = SeparatorChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        assert len(variants) >= 8
+        for v in variants:
+            # Stem contains original stem content
+            assert "capital of France" in v.stem.lower() or "Capital of France" in v.stem
+            # All option texts present
+            for opt in sample_question.options:
+                assert opt.text in v.stem
+
+    def test_separator_change_separators_differ(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Returned variants use different delimiters (stems are distinct)."""
+        pert = SeparatorChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        stems = [v.stem for v in variants]
+        assert len(stems) == len(set(stems)), "All separators should produce distinct output"
+
+    def test_separator_change_preserves_option_texts(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """All original option texts appear in each variant's stem."""
+        pert = SeparatorChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0)
+        option_texts = [opt.text for opt in sample_question.options]
+        for v in variants:
+            for text in option_texts:
+                assert text in v.stem, f"Option text '{text}' missing from variant stem"
+
+
+class TestSeparatorChangeNSampling:
+    """N-sampling tests for SeparatorChangePerturbation."""
+
+    def test_separator_change_n_sampling(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """With n=3, returns exactly 3 variants."""
+        pert = SeparatorChangePerturbation()
+        variants = pert.generate_variants(sample_question, seed=0, n=3)
+        assert len(variants) == 3
+
+
+class TestSeparatorChangeSeedReproducibility:
+    """Seed reproducibility tests for SeparatorChangePerturbation."""
+
+    def test_separator_change_seed_reproducibility(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Same seed + same input = identical output."""
+        pert = SeparatorChangePerturbation()
+        variants_a = pert.generate_variants(sample_question, seed=42, n=3)
+        variants_b = pert.generate_variants(sample_question, seed=42, n=3)
+        assert variants_a == variants_b
+
+    def test_separator_change_different_seeds_differ(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Different seeds produce different output."""
+        pert = SeparatorChangePerturbation()
+        variants_a = pert.generate_variants(sample_question, seed=42, n=3)
+        variants_b = pert.generate_variants(sample_question, seed=99, n=3)
+        assert variants_a != variants_b
+
+
+class TestSeparatorChangeMetadata:
+    """Tests for SeparatorChangePerturbation type and variant metadata."""
+
+    def test_separator_change_perturbation_type(self) -> None:
+        """SeparatorChangePerturbation().perturbation_type is SEPARATOR_CHANGE."""
+        pert = SeparatorChangePerturbation()
+        assert pert.perturbation_type == PerturbationType.SEPARATOR_CHANGE
+
+    def test_separator_change_variant_metadata(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Each variant has correct metadata. Options is None."""
+        pert = SeparatorChangePerturbation()
+        seed = 42
+        variants = pert.generate_variants(sample_question, seed=seed)
+        for i, v in enumerate(variants):
+            assert v.original_question_id == sample_question.id
+            assert v.perturbation_type == PerturbationType.SEPARATOR_CHANGE
+            assert v.seed == seed
+            assert v.variant_index == i
+            assert v.options is None
