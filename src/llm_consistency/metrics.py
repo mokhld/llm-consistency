@@ -6,6 +6,7 @@ Pure functions for computing consistency and accuracy metrics from
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import TYPE_CHECKING
 
@@ -104,3 +105,132 @@ def car_curve(
     if thresholds is None:
         thresholds = [i / 10 for i in range(11)]
     return [(c, mca(results, c)) for c in sorted(thresholds)]
+
+
+def trapezoidal_auc(xs: Sequence[float], ys: Sequence[float]) -> float:
+    """Compute area under curve using the trapezoidal rule.
+
+    CAT paper Equation 6-7:
+        ``sum((MCA(c_k) + MCA(c_{k+1})) / 2 * (c_{k+1} - c_k))``
+
+    Handles non-uniform x spacing correctly.
+
+    Args:
+        xs: X-coordinates (thresholds), must be sorted ascending.
+        ys: Y-coordinates (MCA values at each threshold).
+
+    Returns:
+        Approximate area under the curve, or 0.0 if fewer than 2 points.
+
+    Raises:
+        ValueError: If *xs* and *ys* have different lengths.
+    """
+    if len(xs) != len(ys):
+        msg = "xs and ys must have the same length"
+        raise ValueError(msg)
+    if len(xs) < 2:
+        return 0.0
+    area = 0.0
+    for i in range(len(xs) - 1):
+        area += (ys[i] + ys[i + 1]) / 2.0 * (xs[i + 1] - xs[i])
+    return area
+
+
+def dtw_distance(s: Sequence[float], t: Sequence[float]) -> float:
+    """Compute DTW distance between two 1-D sequences using L1 norm.
+
+    Standard O(NM) dynamic programming algorithm with an ``(n+1) x (m+1)``
+    cost matrix initialized to ``inf``, except ``cost[0][0] = 0``.
+
+    Args:
+        s: First sequence.
+        t: Second sequence.
+
+    Returns:
+        The DTW distance (accumulated minimum-cost alignment distance),
+        or 0.0 if either sequence is empty.
+    """
+    n = len(s)
+    m = len(t)
+    if n == 0 or m == 0:
+        return 0.0
+
+    # Cost matrix with infinity borders
+    cost = [[math.inf] * (m + 1) for _ in range(n + 1)]
+    cost[0][0] = 0.0
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            d = abs(s[i - 1] - t[j - 1])
+            cost[i][j] = d + min(
+                cost[i - 1][j],      # insertion
+                cost[i][j - 1],      # deletion
+                cost[i - 1][j - 1],  # match
+            )
+
+    return cost[n][m]
+
+
+def normalized_dtw(mca_values: Sequence[float]) -> float:
+    """Compute normalized DTW for the CAT framework.
+
+    CAT paper Equation 8:
+        ``norm_DTW = 1 - (DTW_model / DTW_worst)``
+
+    Where:
+      - ``DTW_model = dtw_distance(mca_values, ideal)``
+      - ``DTW_worst = dtw_distance(ideal, worst)``
+      - ``ideal = [1.0, 1.0, ..., 1.0]``
+      - ``worst = [1.0, 0.0, 0.0, ..., 0.0]``
+
+    Args:
+        mca_values: MCA values at each threshold (the model's CAR curve
+            y-values).
+
+    Returns:
+        Normalized DTW in [0.0, 1.0].  1.0 for ideal curve, 0.0 for worst.
+        Returns 1.0 for the degenerate single-point case.
+    """
+    n = len(mca_values)
+    if n <= 1:
+        return 1.0
+
+    ideal = [1.0] * n
+    worst = [1.0] + [0.0] * (n - 1)
+
+    dtw_worst = dtw_distance(ideal, worst)
+    if dtw_worst == 0.0:
+        return 1.0  # pragma: no cover
+
+    dtw_model = dtw_distance(list(mca_values), ideal)
+    return 1.0 - (dtw_model / dtw_worst)
+
+
+def core_index(
+    results: Sequence[QuestionConsistencyResult],
+    thresholds: Sequence[float] | None = None,
+) -> float:
+    """Compute the CORE index (Consistency-Oriented Robustness Estimate).
+
+    CAT paper Equation 9:
+        ``CORE = AUCAR * norm_DTW``
+
+    Composes: ``car_curve`` -> extract xs/ys -> ``trapezoidal_auc`` +
+    ``normalized_dtw`` -> multiply.
+
+    Args:
+        results: Per-question consistency results.
+        thresholds: Consistency thresholds.  Defaults to
+            ``[0.0, 0.1, 0.2, ..., 1.0]``.
+
+    Returns:
+        CORE index in [0.0, 1.0].
+    """
+    curve = car_curve(results, thresholds)
+    xs = [c for c, _ in curve]
+    ys = [m for _, m in curve]
+
+    aucar = trapezoidal_auc(xs, ys)
+    norm_dtw = normalized_dtw(ys)
+
+    return aucar * norm_dtw
