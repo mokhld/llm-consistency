@@ -189,35 +189,36 @@ class TestRegistry:
         assert "beta" in str(exc_info.value)
 
     def test_list_registered_returns_sorted_list(self) -> None:
-        """list_registered() returns names in sorted order."""
+        """list_registered() returns names in sorted order (includes builtins)."""
         stub = _StubPerturbation()
         register("zebra", stub)
         register("apple", stub)
         register("mango", stub)
         result = list_registered()
-        assert result == ["apple", "mango", "zebra"]
+        assert result == ["apple", "mango", "option_reorder", "zebra"]
 
-    def test_list_registered_empty_after_reset(self) -> None:
-        """list_registered() returns empty list after _reset_registry()."""
+    def test_list_registered_contains_builtins_after_reset(self) -> None:
+        """list_registered() contains built-in perturbations after _reset_registry()."""
         stub = _StubPerturbation()
         register("temp", stub)
-        assert len(list_registered()) > 0
+        assert "temp" in list_registered()
         _reset_registry()
-        # No built-ins registered yet (plans 02-03), so empty
-        assert list_registered() == []
+        # Built-in option_reorder is always present after reset
+        assert "option_reorder" in list_registered()
+        assert "temp" not in list_registered()
 
-    def test_reset_registry_clears_and_re_registers_builtins(self) -> None:
-        """_reset_registry() clears all entries and re-registers built-ins.
-
-        In this plan, built-ins are empty (concrete perturbations in plans 02-03),
-        so after reset the registry should be empty.
-        """
+    def test_reset_registry_clears_custom_and_re_registers_builtins(self) -> None:
+        """_reset_registry() clears custom entries and re-registers built-ins."""
         stub = _StubPerturbation()
         register("custom1", stub)
         register("custom2", stub)
-        assert len(list_registered()) == 2
+        assert "custom1" in list_registered()
+        assert "custom2" in list_registered()
         _reset_registry()
-        assert list_registered() == []
+        assert "custom1" not in list_registered()
+        assert "custom2" not in list_registered()
+        # Built-in option_reorder is re-registered
+        assert "option_reorder" in list_registered()
 
 
 # ---------------------------------------------------------------------------

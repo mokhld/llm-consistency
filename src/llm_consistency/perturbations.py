@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import itertools
+import random
+import string
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from llm_consistency.types import MCOption, PerturbationType, PerturbedVariant
+
 if TYPE_CHECKING:
-    from llm_consistency.types import MCQuestion, PerturbationType, PerturbedVariant
+    from llm_consistency.types import MCQuestion
 
 # ---------------------------------------------------------------------------
 # BasePerturbation ABC
@@ -47,6 +52,89 @@ class BasePerturbation(ABC):
             A tuple of ``PerturbedVariant`` instances.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# OptionReorderPerturbation
+# ---------------------------------------------------------------------------
+
+
+class OptionReorderPerturbation(BasePerturbation):
+    """Generate variants by reordering MC options with label reassignment.
+
+    Produces all non-identity permutations of the option list.  Labels
+    are reassigned to match position (A=first, B=second, ...) while
+    ``is_correct`` follows the text content.
+
+    When *n* is specified and smaller than the total number of
+    non-identity permutations, a deterministic sample of size *n* is
+    drawn using ``random.Random(seed)``.  If *n* is ``None`` or
+    exceeds the available count, all non-identity permutations are
+    returned.
+    """
+
+    @property
+    def perturbation_type(self) -> PerturbationType:
+        """Return :attr:`PerturbationType.OPTION_REORDER`."""
+        return PerturbationType.OPTION_REORDER
+
+    def generate_variants(
+        self,
+        question: MCQuestion,
+        *,
+        seed: int = 0,
+        n: int | None = None,
+    ) -> tuple[PerturbedVariant, ...]:
+        """Generate reordered-option variants for *question*.
+
+        Args:
+            question: The original multiple-choice question to perturb.
+            seed: Random seed for deterministic N-sampling.
+            n: Number of variants to generate.  ``None`` returns all
+                non-identity permutations.
+
+        Returns:
+            A tuple of ``PerturbedVariant`` instances.
+        """
+        num_options = len(question.options)
+        labels = string.ascii_uppercase[:num_options]
+        identity = tuple(range(num_options))
+
+        # All permutations minus the identity
+        all_perms = [
+            p
+            for p in itertools.permutations(identity)
+            if p != identity
+        ]
+
+        # N-sampling
+        if n is not None and n < len(all_perms):
+            selected = random.Random(seed).sample(all_perms, k=n)
+        else:
+            selected = all_perms
+
+        variants: list[PerturbedVariant] = []
+        for idx, perm in enumerate(selected):
+            new_options = tuple(
+                MCOption(
+                    label=labels[new_pos],
+                    text=question.options[orig_idx].text,
+                    is_correct=question.options[orig_idx].is_correct,
+                )
+                for new_pos, orig_idx in enumerate(perm)
+            )
+            variants.append(
+                PerturbedVariant(
+                    original_question_id=question.id,
+                    perturbation_type=PerturbationType.OPTION_REORDER,
+                    seed=seed,
+                    variant_index=idx,
+                    stem=question.stem,
+                    options=new_options,
+                )
+            )
+
+        return tuple(variants)
 
 
 # ---------------------------------------------------------------------------
@@ -118,11 +206,8 @@ def list_registered() -> list[str]:
 
 
 def _register_builtins() -> None:
-    """Register built-in perturbation instances.
-
-    Currently a no-op -- concrete perturbation classes will be registered
-    here in plans 02-03 once they exist.
-    """
+    """Register built-in perturbation instances."""
+    register(PerturbationType.OPTION_REORDER.value, OptionReorderPerturbation())
 
 
 def _reset_registry() -> None:
@@ -134,3 +219,7 @@ def _reset_registry() -> None:
     """
     _REGISTRY.clear()
     _register_builtins()
+
+
+# Auto-register built-in perturbations on import
+_register_builtins()
