@@ -597,3 +597,130 @@ class TestSeparatorChangeMetadata:
             assert v.seed == seed
             assert v.variant_index == i
             assert v.options is None
+
+
+# ---------------------------------------------------------------------------
+# Custom perturbation registration tests (PERT-09)
+# ---------------------------------------------------------------------------
+
+
+class _MockCustomPerturbation(BasePerturbation):
+    """A mock custom perturbation for testing the extension mechanism."""
+
+    @property
+    def perturbation_type(self) -> PerturbationType:
+        return PerturbationType.FORMAT_CHANGE
+
+    def generate_variants(
+        self,
+        question: MCQuestion,
+        *,
+        seed: int = 0,
+        n: int | None = None,
+    ) -> tuple[PerturbedVariant, ...]:
+        return (
+            PerturbedVariant(
+                original_question_id=question.id,
+                perturbation_type=self.perturbation_type,
+                seed=seed,
+                variant_index=0,
+                stem=f"[custom] {question.stem}",
+                options=question.options,
+            ),
+        )
+
+
+class TestCustomPerturbationRegistration:
+    """Tests for custom perturbation registration workflow (PERT-09)."""
+
+    def test_custom_perturbation_register_and_retrieve(self) -> None:
+        """Custom perturbation can be registered and retrieved by name."""
+        custom = _MockCustomPerturbation()
+        register("my_custom", custom)
+        assert get("my_custom") is custom
+        assert "my_custom" in list_registered()
+
+    def test_custom_perturbation_generate_variants(self) -> None:
+        """Registered custom perturbation generates expected output."""
+        custom = _MockCustomPerturbation()
+        register("my_custom", custom)
+        retrieved = get("my_custom")
+        variants = retrieved.generate_variants(_QUESTION, seed=7)
+        assert len(variants) == 1
+        assert variants[0].stem == "[custom] Capital of France?"
+        assert variants[0].original_question_id == "q1"
+        assert variants[0].seed == 7
+
+    def test_custom_perturbation_force_overwrite(self) -> None:
+        """force=True allows replacing a built-in perturbation."""
+        custom = _MockCustomPerturbation()
+        register("option_reorder", custom, force=True)
+        assert get("option_reorder") is custom
+        assert isinstance(get("option_reorder"), _MockCustomPerturbation)
+        # After reset, the built-in is restored
+        _reset_registry()
+        assert isinstance(get("option_reorder"), OptionReorderPerturbation)
+
+    def test_custom_perturbation_no_force_overwrite_raises(self) -> None:
+        """Registering under a built-in name without force raises ValueError."""
+        custom = _MockCustomPerturbation()
+        with pytest.raises(ValueError, match="already registered"):
+            register("option_reorder", custom)
+
+    def test_reset_registry_restores_builtins(self) -> None:
+        """_reset_registry() restores exactly the 3 built-in perturbations."""
+        custom = _MockCustomPerturbation()
+        register("extra", custom)
+        _reset_registry()
+        expected = ["format_change", "option_reorder", "separator_change"]
+        assert list_registered() == expected
+        assert isinstance(get("format_change"), FormatChangePerturbation)
+        assert isinstance(get("option_reorder"), OptionReorderPerturbation)
+        assert isinstance(get("separator_change"), SeparatorChangePerturbation)
+
+
+# ---------------------------------------------------------------------------
+# Public API import tests
+# ---------------------------------------------------------------------------
+
+
+class TestPublicAPIPerturbationImports:
+    """Tests for perturbation symbols in the llm_consistency public API."""
+
+    def test_public_api_perturbation_imports(self) -> None:
+        """Core perturbation symbols are importable from llm_consistency."""
+        from llm_consistency import (  # type: ignore[attr-defined]
+            BasePerturbation as BP,
+            FormatChangePerturbation as FCP,
+            OptionReorderPerturbation as ORP,
+            SeparatorChangePerturbation as SCP,
+            get_perturbation,
+            list_registered_perturbations,
+            register_perturbation,
+        )
+
+        assert BP is BasePerturbation
+        assert ORP is OptionReorderPerturbation
+        assert FCP is FormatChangePerturbation
+        assert SCP is SeparatorChangePerturbation
+        # Registry functions should be callable
+        assert callable(register_perturbation)
+        assert callable(get_perturbation)
+        assert callable(list_registered_perturbations)
+
+    def test_public_api_all_includes_perturbations(self) -> None:
+        """All perturbation symbols appear in llm_consistency.__all__."""
+        import llm_consistency
+
+        all_symbols = llm_consistency.__all__
+        expected = [
+            "BasePerturbation",
+            "FormatChangePerturbation",
+            "OptionReorderPerturbation",
+            "SeparatorChangePerturbation",
+            "get_perturbation",
+            "list_registered_perturbations",
+            "register_perturbation",
+        ]
+        for symbol in expected:
+            assert symbol in all_symbols, f"'{symbol}' not in __all__"
