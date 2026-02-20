@@ -1,10 +1,12 @@
-"""Tests for llm_consistency.metrics - builder, MCA, CAR curve, AUC, DTW, CORE."""
+"""Tests for llm_consistency.metrics - builder, MCA, CAR, AUC, DTW, CORE, AGA, CI."""
 
 from __future__ import annotations
 
 import pytest
 
 from llm_consistency.metrics import (
+    agreement_gated_accuracy,
+    bootstrap_ci,
     build_question_consistency_result,
     car_curve,
     core_index,
@@ -573,3 +575,217 @@ class TestCOREIndex:
         assert core_index(results, thresholds=[0.0, 0.5, 1.0]) == pytest.approx(
             expected
         )
+
+
+# ── Helper for AGA tests (QCR with both rc_correct and rc_agree) ──
+
+
+def _qcr_two_axis(
+    question_id: str, rc_correct: float, rc_agree: float
+) -> QuestionConsistencyResult:
+    """Create a QCR with explicit rc_correct and rc_agree for AGA tests."""
+    return QuestionConsistencyResult(
+        question_id=question_id,
+        rc_correct=rc_correct,
+        rc_agree=rc_agree,
+        total_variants=1,
+        correct_count=round(rc_correct),
+    )
+
+
+# ── AgreementGatedAccuracy tests ──
+
+
+class TestAgreementGatedAccuracy:
+    """Tests for agreement_gated_accuracy() -- extension metric."""
+
+    def test_tau_filters_correctly(self) -> None:
+        """tau_agree=0.5 keeps only questions with rc_agree >= 0.5.
+
+        4 questions: rc_correct=[1.0, 0.8, 0.6, 0.0], rc_agree=[1.0, 0.8, 0.4, 0.2]
+        Filter keeps q1(1.0) and q2(0.8) -> mean(1.0, 0.8) = 0.9
+        """
+        results = [
+            _qcr_two_axis("q1", rc_correct=1.0, rc_agree=1.0),
+            _qcr_two_axis("q2", rc_correct=0.8, rc_agree=0.8),
+            _qcr_two_axis("q3", rc_correct=0.6, rc_agree=0.4),
+            _qcr_two_axis("q4", rc_correct=0.0, rc_agree=0.2),
+        ]
+        assert agreement_gated_accuracy(results, tau_agree=0.5) == pytest.approx(0.9)
+
+    def test_tau_zero_includes_all(self) -> None:
+        """tau_agree=0.0 includes all questions -> mean of all rc_correct."""
+        results = [
+            _qcr_two_axis("q1", rc_correct=1.0, rc_agree=1.0),
+            _qcr_two_axis("q2", rc_correct=0.8, rc_agree=0.8),
+            _qcr_two_axis("q3", rc_correct=0.6, rc_agree=0.4),
+            _qcr_two_axis("q4", rc_correct=0.0, rc_agree=0.2),
+        ]
+        assert agreement_gated_accuracy(results, tau_agree=0.0) == pytest.approx(0.6)
+
+    def test_tau_one_keeps_only_perfect_agree(self) -> None:
+        """tau_agree=1.0 keeps only q1 (rc_agree=1.0) -> mean(1.0) = 1.0."""
+        results = [
+            _qcr_two_axis("q1", rc_correct=1.0, rc_agree=1.0),
+            _qcr_two_axis("q2", rc_correct=0.8, rc_agree=0.8),
+            _qcr_two_axis("q3", rc_correct=0.6, rc_agree=0.4),
+            _qcr_two_axis("q4", rc_correct=0.0, rc_agree=0.2),
+        ]
+        assert agreement_gated_accuracy(results, tau_agree=1.0) == pytest.approx(1.0)
+
+    def test_tau_099_keeps_only_perfect(self) -> None:
+        """tau_agree=0.99 keeps only q1 (rc_agree=1.0) -> 1.0."""
+        results = [
+            _qcr_two_axis("q1", rc_correct=1.0, rc_agree=1.0),
+            _qcr_two_axis("q2", rc_correct=0.8, rc_agree=0.8),
+        ]
+        assert agreement_gated_accuracy(results, tau_agree=0.99) == pytest.approx(1.0)
+
+    def test_all_below_threshold_returns_zero(self) -> None:
+        """When no question passes the filter, return 0.0."""
+        results = [
+            _qcr_two_axis("q1", rc_correct=1.0, rc_agree=0.3),
+            _qcr_two_axis("q2", rc_correct=0.8, rc_agree=0.4),
+        ]
+        assert agreement_gated_accuracy(results, tau_agree=0.5) == pytest.approx(0.0)
+
+    def test_empty_results_returns_zero(self) -> None:
+        """Empty results returns 0.0."""
+        assert agreement_gated_accuracy([], tau_agree=0.5) == pytest.approx(0.0)
+
+
+# ── Bootstrap CI tests ──
+
+
+class TestBootstrapCI:
+    """Tests for bootstrap_ci() -- confidence interval estimation."""
+
+    def test_reproducibility_same_seed(self) -> None:
+        """Same seed + same input produces identical CI bounds."""
+        results = [
+            _qcr_two_axis("q1", rc_correct=1.0, rc_agree=1.0),
+            _qcr_two_axis("q2", rc_correct=0.5, rc_agree=0.5),
+            _qcr_two_axis("q3", rc_correct=0.0, rc_agree=0.3),
+        ]
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, threshold=0.5)
+
+        ci1 = bootstrap_ci(results, statistic=stat, n_bootstrap=500, seed=42)
+        ci2 = bootstrap_ci(results, statistic=stat, n_bootstrap=500, seed=42)
+        assert ci1[0] == pytest.approx(ci2[0])
+        assert ci1[1] == pytest.approx(ci2[1])
+
+    def test_perfect_model_tight_ci(self) -> None:
+        """Perfect model (all rc_correct=1.0): CI should be tight around 1.0."""
+        results = [_qcr("q1", 1.0), _qcr("q2", 1.0), _qcr("q3", 1.0)]
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, threshold=1.0)
+
+        lower, upper = bootstrap_ci(results, statistic=stat, n_bootstrap=1000, seed=42)
+        assert lower == pytest.approx(1.0)
+        assert upper == pytest.approx(1.0)
+
+    def test_mixed_model_meaningful_ci(self) -> None:
+        """Mixed model: lower < point_estimate < upper."""
+        results = [
+            _qcr("q1", 1.0),
+            _qcr("q2", 0.8),
+            _qcr("q3", 0.6),
+            _qcr("q4", 0.0),
+        ]
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, threshold=0.5)
+
+        point_estimate = stat(list(results))
+        lower, upper = bootstrap_ci(
+            results, statistic=stat, n_bootstrap=2000, seed=42
+        )
+        assert lower <= point_estimate
+        assert upper >= point_estimate
+        # CI should have some width for mixed data
+        assert upper > lower
+
+    def test_different_seeds_different_results(self) -> None:
+        """Different seeds produce different CI bounds."""
+        results = [
+            _qcr("q1", 1.0),
+            _qcr("q2", 0.5),
+            _qcr("q3", 0.0),
+        ]
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, threshold=0.5)
+
+        ci_a = bootstrap_ci(results, statistic=stat, n_bootstrap=500, seed=42)
+        ci_b = bootstrap_ci(results, statistic=stat, n_bootstrap=500, seed=99)
+        # With different seeds, at least one bound should differ
+        assert ci_a != ci_b
+
+    def test_lambda_statistic_works(self) -> None:
+        """Partial function pattern: lambda wrapping mca should work."""
+        results = [_qcr("q1", 1.0), _qcr("q2", 0.5)]
+        lower, upper = bootstrap_ci(
+            results,
+            statistic=lambda r: mca(r, threshold=0.5),
+            n_bootstrap=100,
+            seed=42,
+        )
+        assert isinstance(lower, float)
+        assert isinstance(upper, float)
+        assert lower <= upper
+
+    def test_returns_tuple_of_floats(self) -> None:
+        """Return type is a tuple of two floats."""
+        results = [_qcr("q1", 1.0)]
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, threshold=0.5)
+
+        result = bootstrap_ci(results, statistic=stat, n_bootstrap=50, seed=1)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], float)
+        assert isinstance(result[1], float)
+
+
+# ── Public API import tests ──
+
+
+class TestPublicAPIImports:
+    """Verify all metric functions are importable from llm_consistency."""
+
+    def test_all_metrics_importable(self) -> None:
+        """All metric functions are importable from the llm_consistency package."""
+        from llm_consistency import (  # noqa: F401
+            agreement_gated_accuracy,
+            bootstrap_ci,
+            build_question_consistency_result,
+            car_curve,
+            core_index,
+            dtw_distance,
+            mca,
+            normalized_dtw,
+            trapezoidal_auc,
+        )
+
+    def test_metrics_in_all(self) -> None:
+        """All metric function names are in __all__."""
+        import llm_consistency
+
+        all_names = llm_consistency.__all__
+        metric_names = [
+            "build_question_consistency_result",
+            "mca",
+            "car_curve",
+            "trapezoidal_auc",
+            "dtw_distance",
+            "normalized_dtw",
+            "core_index",
+            "agreement_gated_accuracy",
+            "bootstrap_ci",
+        ]
+        for name in metric_names:
+            assert name in all_names, f"{name} not in __all__"
