@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 from llm_consistency.types import MCOption, PerturbationType, PerturbedVariant
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from llm_consistency.types import MCQuestion
 
 # ---------------------------------------------------------------------------
@@ -138,6 +140,217 @@ class OptionReorderPerturbation(BasePerturbation):
 
 
 # ---------------------------------------------------------------------------
+# Format-change templates
+# ---------------------------------------------------------------------------
+
+
+def _fmt_dot(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Dot-separated: ``A. Paris``."""
+    block = "\n".join(f"{o.label}. {o.text}" for o in options)
+    return f"{stem}\n{block}"
+
+
+def _fmt_paren(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Parenthetical: ``A) Paris``."""
+    block = "\n".join(f"{o.label}) {o.text}" for o in options)
+    return f"{stem}\n{block}"
+
+
+def _fmt_enclosed(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Enclosed parenthetical: ``(A) Paris``."""
+    block = "\n".join(f"({o.label}) {o.text}" for o in options)
+    return f"{stem}\n{block}"
+
+
+def _fmt_numbered(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Numbered (no letter labels): ``1. Paris``."""
+    block = "\n".join(f"{i + 1}. {o.text}" for i, o in enumerate(options))
+    return f"{stem}\n{block}"
+
+
+def _fmt_markdown(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Markdown bullet: ``- A: Paris``."""
+    block = "\n".join(f"- {o.label}: {o.text}" for o in options)
+    return f"{stem}\n\n{block}"
+
+
+def _fmt_verbose(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Verbose uppercase: ``OPTION A: Paris``."""
+    block = "\n".join(f"OPTION {o.label}: {o.text}" for o in options)
+    return f"{stem}\n{block}"
+
+
+def _fmt_tabular(stem: str, options: tuple[MCOption, ...]) -> str:
+    """Tabular aligned: ``  A  Paris``."""
+    block = "\n".join(f"  {o.label}  {o.text}" for o in options)
+    return f"{stem}\n{block}"
+
+
+_TEMPLATES: tuple[
+    Callable[[str, tuple[MCOption, ...]], str], ...
+] = (
+    _fmt_dot,
+    _fmt_paren,
+    _fmt_enclosed,
+    _fmt_numbered,
+    _fmt_markdown,
+    _fmt_verbose,
+    _fmt_tabular,
+)
+
+
+# ---------------------------------------------------------------------------
+# FormatChangePerturbation
+# ---------------------------------------------------------------------------
+
+
+class FormatChangePerturbation(BasePerturbation):
+    """Generate variants by applying different formatting templates.
+
+    Produces one variant per template from :data:`_TEMPLATES` (minimum 6).
+    Each template renders the full question (stem + options) into the
+    variant's ``stem`` field, with ``options=None`` because the options
+    have been rendered into a presentation string.
+
+    When *n* is specified and smaller than the total number of templates,
+    a deterministic sample of size *n* is drawn using ``random.Random(seed)``.
+    If *n* is ``None`` or exceeds the available count, all templates are used.
+    """
+
+    @property
+    def perturbation_type(self) -> PerturbationType:
+        """Return :attr:`PerturbationType.FORMAT_CHANGE`."""
+        return PerturbationType.FORMAT_CHANGE
+
+    def generate_variants(
+        self,
+        question: MCQuestion,
+        *,
+        seed: int = 0,
+        n: int | None = None,
+    ) -> tuple[PerturbedVariant, ...]:
+        """Generate format-changed variants for *question*.
+
+        Args:
+            question: The original multiple-choice question to perturb.
+            seed: Random seed for deterministic N-sampling.
+            n: Number of variants to generate.  ``None`` returns all
+                template variants.
+
+        Returns:
+            A tuple of ``PerturbedVariant`` instances.
+        """
+        all_rendered = [
+            tmpl(question.stem, question.options) for tmpl in _TEMPLATES
+        ]
+
+        # N-sampling
+        if n is not None and n < len(all_rendered):
+            indices = list(range(len(all_rendered)))
+            selected_indices = random.Random(seed).sample(indices, k=n)
+            selected = [all_rendered[i] for i in selected_indices]
+        else:
+            selected = all_rendered
+
+        return tuple(
+            PerturbedVariant(
+                original_question_id=question.id,
+                perturbation_type=PerturbationType.FORMAT_CHANGE,
+                seed=seed,
+                variant_index=idx,
+                stem=rendered,
+                options=None,
+            )
+            for idx, rendered in enumerate(selected)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Separator variants
+# ---------------------------------------------------------------------------
+
+_SEPARATORS: tuple[str, ...] = (
+    "\n",       # newline
+    "\n\n",     # double newline
+    "; ",       # semicolon
+    ", ",       # comma
+    " | ",      # pipe
+    " - ",      # dash
+    "\t",       # tab
+    " / ",      # slash
+)
+
+
+# ---------------------------------------------------------------------------
+# SeparatorChangePerturbation
+# ---------------------------------------------------------------------------
+
+
+class SeparatorChangePerturbation(BasePerturbation):
+    """Generate variants by varying the delimiter between options.
+
+    Uses a default rendering format (``A. text``) and varies only the
+    separator between options.  Produces one variant per separator from
+    :data:`_SEPARATORS` (minimum 8).
+
+    Each variant renders the full question (stem + separated options) into
+    the variant's ``stem`` field, with ``options=None``.
+
+    When *n* is specified and smaller than the total number of separators,
+    a deterministic sample of size *n* is drawn using ``random.Random(seed)``.
+    """
+
+    @property
+    def perturbation_type(self) -> PerturbationType:
+        """Return :attr:`PerturbationType.SEPARATOR_CHANGE`."""
+        return PerturbationType.SEPARATOR_CHANGE
+
+    def generate_variants(
+        self,
+        question: MCQuestion,
+        *,
+        seed: int = 0,
+        n: int | None = None,
+    ) -> tuple[PerturbedVariant, ...]:
+        """Generate separator-changed variants for *question*.
+
+        Args:
+            question: The original multiple-choice question to perturb.
+            seed: Random seed for deterministic N-sampling.
+            n: Number of variants to generate.  ``None`` returns all
+                separator variants.
+
+        Returns:
+            A tuple of ``PerturbedVariant`` instances.
+        """
+        option_parts = [f"{o.label}. {o.text}" for o in question.options]
+
+        all_rendered = [
+            f"{question.stem}\n{sep.join(option_parts)}" for sep in _SEPARATORS
+        ]
+
+        # N-sampling
+        if n is not None and n < len(all_rendered):
+            indices = list(range(len(all_rendered)))
+            selected_indices = random.Random(seed).sample(indices, k=n)
+            selected = [all_rendered[i] for i in selected_indices]
+        else:
+            selected = all_rendered
+
+        return tuple(
+            PerturbedVariant(
+                original_question_id=question.id,
+                perturbation_type=PerturbationType.SEPARATOR_CHANGE,
+                seed=seed,
+                variant_index=idx,
+                stem=rendered,
+                options=None,
+            )
+            for idx, rendered in enumerate(selected)
+        )
+
+
+# ---------------------------------------------------------------------------
 # Plugin registry
 # ---------------------------------------------------------------------------
 
@@ -208,6 +421,8 @@ def list_registered() -> list[str]:
 def _register_builtins() -> None:
     """Register built-in perturbation instances."""
     register(PerturbationType.OPTION_REORDER.value, OptionReorderPerturbation())
+    register(PerturbationType.FORMAT_CHANGE.value, FormatChangePerturbation())
+    register(PerturbationType.SEPARATOR_CHANGE.value, SeparatorChangePerturbation())
 
 
 def _reset_registry() -> None:

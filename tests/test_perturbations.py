@@ -197,7 +197,14 @@ class TestRegistry:
         register("apple", stub)
         register("mango", stub)
         result = list_registered()
-        assert result == ["apple", "mango", "option_reorder", "zebra"]
+        assert result == [
+            "apple",
+            "format_change",
+            "mango",
+            "option_reorder",
+            "separator_change",
+            "zebra",
+        ]
 
     def test_list_registered_contains_builtins_after_reset(self) -> None:
         """list_registered() contains built-in perturbations after _reset_registry()."""
@@ -205,8 +212,10 @@ class TestRegistry:
         register("temp", stub)
         assert "temp" in list_registered()
         _reset_registry()
-        # Built-in option_reorder is always present after reset
+        # All built-ins are always present after reset
         assert "option_reorder" in list_registered()
+        assert "format_change" in list_registered()
+        assert "separator_change" in list_registered()
         assert "temp" not in list_registered()
 
     def test_reset_registry_clears_custom_and_re_registers_builtins(self) -> None:
@@ -407,7 +416,7 @@ class TestFormatChangeCore:
         assert len(variants) >= 6
         for v in variants:
             # Stem contains original stem content
-            assert "capital of France" in v.stem.lower() or "Capital of France" in v.stem
+            assert "capital of france" in v.stem.lower()
             # All option texts present in the rendered stem
             for opt in sample_question.options:
                 assert opt.text in v.stem
@@ -507,7 +516,7 @@ class TestSeparatorChangeCore:
         assert len(variants) >= 8
         for v in variants:
             # Stem contains original stem content
-            assert "capital of France" in v.stem.lower() or "Capital of France" in v.stem
+            assert "capital of france" in v.stem.lower()
             # All option texts present
             for opt in sample_question.options:
                 assert opt.text in v.stem
