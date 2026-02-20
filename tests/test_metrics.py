@@ -1,4 +1,4 @@
-"""Tests for llm_consistency.metrics – build_question_consistency_result."""
+"""Tests for llm_consistency.metrics - build_question_consistency_result."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ class TestBuildQuestionConsistencyResult:
     # ── Happy-path parametrized tests with hand-calculated values ──
 
     @pytest.mark.parametrize(
-        "question_id, variant_answers, expected_rc_correct, expected_rc_agree, expected_distribution",
+        "question_id, variant_answers, expected_rc_correct,"
+        " expected_rc_agree, expected_distribution",
         [
             pytest.param(
                 "q1",
