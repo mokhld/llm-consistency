@@ -1,4 +1,4 @@
-"""Tests for llm_consistency.metrics - builder, MCA, and CAR curve."""
+"""Tests for llm_consistency.metrics - builder, MCA, CAR curve, AUC, DTW, CORE."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import pytest
 from llm_consistency.metrics import (
     build_question_consistency_result,
     car_curve,
+    core_index,
+    dtw_distance,
     mca,
+    normalized_dtw,
+    trapezoidal_auc,
 )
 from llm_consistency.types import QuestionConsistencyResult
 
@@ -306,3 +310,266 @@ class TestCARCurve:
         curve = car_curve(results, thresholds=[0.5])
         assert len(curve) == 1
         assert curve[0] == pytest.approx((0.5, 1.0))
+
+
+# ── Trapezoidal AUC tests ──
+
+
+class TestTrapezoidalAUC:
+    """Tests for the trapezoidal_auc() function -- CAT paper Eq.6-7."""
+
+    def test_rectangle(self) -> None:
+        """Constant function y=1 over [0,1] has area 1.0."""
+        assert trapezoidal_auc([0.0, 1.0], [1.0, 1.0]) == pytest.approx(1.0)
+
+    def test_triangle(self) -> None:
+        """Linear function y=1->0 over [0,1] has area 0.5."""
+        assert trapezoidal_auc([0.0, 1.0], [1.0, 0.0]) == pytest.approx(0.5)
+
+    def test_three_points_uniform(self) -> None:
+        """Hand-calculated: xs=[0, 0.5, 1.0], ys=[1.0, 0.75, 0.25].
+
+        area = 0.5*(1.0+0.75)/2 + 0.5*(0.75+0.25)/2 = 0.4375 + 0.25 = 0.6875
+        """
+        assert trapezoidal_auc(
+            [0.0, 0.5, 1.0], [1.0, 0.75, 0.25]
+        ) == pytest.approx(0.6875)
+
+    def test_non_uniform_spacing(self) -> None:
+        """Non-uniform x spacing: xs=[0, 0.3, 1.0], ys=[1.0, 1.0, 0.0].
+
+        area = 0.3*(1.0+1.0)/2 + 0.7*(1.0+0.0)/2 = 0.3 + 0.35 = 0.65
+        """
+        assert trapezoidal_auc(
+            [0.0, 0.3, 1.0], [1.0, 1.0, 0.0]
+        ) == pytest.approx(0.65)
+
+    def test_single_point_returns_zero(self) -> None:
+        """Fewer than 2 points returns 0.0."""
+        assert trapezoidal_auc([0.5], [1.0]) == pytest.approx(0.0)
+
+    def test_empty_returns_zero(self) -> None:
+        """Empty sequences return 0.0."""
+        assert trapezoidal_auc([], []) == pytest.approx(0.0)
+
+    def test_mismatched_lengths_raises(self) -> None:
+        """Mismatched xs and ys lengths must raise ValueError."""
+        with pytest.raises(ValueError, match="same length"):
+            trapezoidal_auc([0.0, 1.0], [1.0])
+
+    def test_all_zeros(self) -> None:
+        """All-zero y values produce area 0.0."""
+        assert trapezoidal_auc([0.0, 0.5, 1.0], [0.0, 0.0, 0.0]) == pytest.approx(
+            0.0
+        )
+
+    def test_worst_model_aucar(self) -> None:
+        """Worst model CAR: y=[1,0,...,0] over default 11 thresholds.
+
+        AUCAR = 0.5 * 0.1 * (1.0+0.0) = 0.05
+        """
+        xs = [i / 10 for i in range(11)]
+        ys = [1.0] + [0.0] * 10
+        assert trapezoidal_auc(xs, ys) == pytest.approx(0.05)
+
+
+# ── DTW distance tests ──
+
+
+class TestDTWDistance:
+    """Tests for the dtw_distance() function -- O(NM) DP with L1 norm."""
+
+    def test_identical_sequences(self) -> None:
+        """DTW of identical sequences is 0.0."""
+        assert dtw_distance([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == pytest.approx(0.0)
+
+    def test_single_elements(self) -> None:
+        """DTW of [0] and [1] is 1.0."""
+        assert dtw_distance([0.0], [1.0]) == pytest.approx(1.0)
+
+    def test_empty_first_returns_zero(self) -> None:
+        """DTW with empty first sequence returns 0.0."""
+        assert dtw_distance([], [1.0, 2.0]) == pytest.approx(0.0)
+
+    def test_empty_second_returns_zero(self) -> None:
+        """DTW with empty second sequence returns 0.0."""
+        assert dtw_distance([1.0, 2.0], []) == pytest.approx(0.0)
+
+    def test_both_empty_returns_zero(self) -> None:
+        """DTW with both empty sequences returns 0.0."""
+        assert dtw_distance([], []) == pytest.approx(0.0)
+
+    def test_hand_calculated_worst_vs_ideal_3pt(self) -> None:
+        """Hand-calculated DTW for 3-point worst-vs-ideal case.
+
+        ideal = [1.0, 1.0, 1.0], worst = [1.0, 0.0, 0.0]
+        DTW cost matrix (from plan):
+          cost[1][1] = |1-1| + 0 = 0.0
+          cost[1][2] = |1-0| + 0.0 = 1.0
+          cost[1][3] = |1-0| + 1.0 = 2.0
+          cost[2][1] = |1-1| + 0.0 = 0.0
+          cost[2][2] = |1-0| + min(0.0, 1.0, 0.0) = 1.0
+          cost[2][3] = |1-0| + min(1.0, 2.0, 1.0) = 2.0
+          cost[3][1] = |1-1| + 0.0 = 0.0
+          cost[3][2] = |1-0| + min(0.0, 0.0, 1.0) = 1.0
+          cost[3][3] = |1-0| + min(1.0, 2.0, 1.0) = 2.0
+        DTW = 2.0
+        """
+        assert dtw_distance(
+            [1.0, 1.0, 1.0], [1.0, 0.0, 0.0]
+        ) == pytest.approx(2.0)
+
+    def test_symmetric(self) -> None:
+        """DTW(s, t) == DTW(t, s) for known sequences."""
+        s = [1.0, 2.0, 3.0]
+        t = [1.0, 1.0, 2.0]
+        assert dtw_distance(s, t) == pytest.approx(dtw_distance(t, s))
+
+    def test_different_lengths(self) -> None:
+        """DTW handles sequences of different lengths.
+
+        s = [1.0, 1.0], t = [1.0, 0.0, 0.0]
+        cost[1][1] = 0.0
+        cost[1][2] = |1-0| + 0.0 = 1.0
+        cost[1][3] = |1-0| + 1.0 = 2.0
+        cost[2][1] = |1-1| + 0.0 = 0.0
+        cost[2][2] = |1-0| + min(0.0, 1.0, 0.0) = 1.0
+        cost[2][3] = |1-0| + min(1.0, 2.0, 1.0) = 2.0
+        DTW = 2.0
+        """
+        assert dtw_distance([1.0, 1.0], [1.0, 0.0, 0.0]) == pytest.approx(2.0)
+
+    def test_all_same_values(self) -> None:
+        """DTW of sequences with same constant value is 0.0."""
+        assert dtw_distance([5.0, 5.0, 5.0], [5.0, 5.0]) == pytest.approx(0.0)
+
+
+# ── Normalized DTW tests ──
+
+
+class TestNormalizedDTW:
+    """Tests for normalized_dtw() -- CAT paper Equation 8."""
+
+    def test_ideal_curve_returns_one(self) -> None:
+        """Ideal curve [1,1,...,1] has normalized DTW = 1.0."""
+        assert normalized_dtw([1.0, 1.0, 1.0]) == pytest.approx(1.0)
+
+    def test_worst_curve_returns_zero(self) -> None:
+        """Worst curve [1,0,...,0] has normalized DTW = 0.0."""
+        assert normalized_dtw([1.0, 0.0, 0.0]) == pytest.approx(0.0)
+
+    def test_single_point_returns_one(self) -> None:
+        """Single-point degenerate case returns 1.0."""
+        assert normalized_dtw([0.5]) == pytest.approx(1.0)
+
+    def test_partial_curve(self) -> None:
+        """Partial curve [1.0, 0.75, 0.25] -- verify range [0,1].
+
+        DTW_worst = dtw([1,1,1], [1,0,0]) = 2.0 (hand-calculated above)
+        DTW_model = dtw([1.0, 0.75, 0.25], [1,1,1])
+        Need to compute:
+          cost[1][1] = |1-1| = 0.0
+          cost[1][2] = |0.75-1| + 0.0 = 0.25
+          cost[1][3] = |0.25-1| + 0.25 = 1.0
+          cost[2][1] = |1-1| + 0.0 = 0.0
+          cost[2][2] = |0.75-1| + min(0.0, 0.25, 0.0) = 0.25
+          cost[2][3] = |0.25-1| + min(0.25, 1.0, 0.25) = 1.0
+          cost[3][1] = |1-1| + 0.0 = 0.0
+          cost[3][2] = |0.75-1| + min(0.0, 0.0, 0.25) = 0.25
+          cost[3][3] = |0.25-1| + min(0.25, 1.0, 0.25) = 1.0
+        DTW_model = 1.0
+        norm_DTW = 1 - (1.0 / 2.0) = 0.5
+        """
+        assert normalized_dtw([1.0, 0.75, 0.25]) == pytest.approx(0.5)
+
+    def test_result_in_range(self) -> None:
+        """Normalized DTW is always in [0.0, 1.0]."""
+        values = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
+        result = normalized_dtw(values)
+        assert 0.0 <= result <= 1.0
+
+    def test_11_point_ideal(self) -> None:
+        """11-point ideal curve (default thresholds) returns 1.0."""
+        assert normalized_dtw([1.0] * 11) == pytest.approx(1.0)
+
+    def test_11_point_worst(self) -> None:
+        """11-point worst curve returns 0.0."""
+        assert normalized_dtw([1.0] + [0.0] * 10) == pytest.approx(0.0)
+
+
+# ── CORE index tests ──
+
+
+class TestCOREIndex:
+    """Tests for the core_index() function -- CAT paper Equation 9."""
+
+    def test_perfect_model(self) -> None:
+        """Perfect model (all rc_correct=1.0) has CORE = 1.0."""
+        results = [_qcr("q1", 1.0), _qcr("q2", 1.0), _qcr("q3", 1.0)]
+        assert core_index(results) == pytest.approx(1.0)
+
+    def test_worst_model(self) -> None:
+        """Worst model (all rc_correct=0.0) has CORE = 0.0."""
+        results = [_qcr(f"q{i}", 0.0) for i in range(5)]
+        assert core_index(results) == pytest.approx(0.0)
+
+    def test_mixed_model_custom_thresholds(self) -> None:
+        """Mixed model with custom thresholds [0.0, 0.5, 1.0].
+
+        Results: rc_correct = [1.0, 0.8, 0.6, 0.0]
+        CAR: [(0.0, 1.0), (0.5, 0.75), (1.0, 0.25)]
+        AUCAR = 0.6875
+        MCA values = [1.0, 0.75, 0.25]
+        norm_DTW = 0.5 (from TestNormalizedDTW.test_partial_curve)
+        CORE = 0.6875 * 0.5 = 0.34375
+        """
+        results = [
+            _qcr("q1", 1.0),
+            _qcr("q2", 0.8),
+            _qcr("q3", 0.6),
+            _qcr("q4", 0.0),
+        ]
+        assert core_index(results, thresholds=[0.0, 0.5, 1.0]) == pytest.approx(
+            0.34375
+        )
+
+    def test_core_in_range(self) -> None:
+        """CORE values are always in [0.0, 1.0]."""
+        results = [
+            _qcr("q1", 1.0),
+            _qcr("q2", 0.5),
+            _qcr("q3", 0.3),
+            _qcr("q4", 0.0),
+        ]
+        result = core_index(results)
+        assert 0.0 <= result <= 1.0
+
+    def test_core_with_default_thresholds(self) -> None:
+        """CORE with default 11 thresholds for a perfect model is 1.0."""
+        results = [_qcr("q1", 1.0), _qcr("q2", 1.0)]
+        assert core_index(results) == pytest.approx(1.0)
+
+    def test_single_question_perfect(self) -> None:
+        """Single perfect question: CORE = 1.0."""
+        results = [_qcr("q1", 1.0)]
+        assert core_index(results) == pytest.approx(1.0)
+
+    def test_composes_car_curve_auc_dtw(self) -> None:
+        """Verify CORE = AUCAR * norm_DTW by computing components separately.
+
+        Use custom thresholds [0.0, 0.5, 1.0] with perfect model.
+        CAR: [(0.0, 1.0), (0.5, 1.0), (1.0, 1.0)]
+        AUCAR = 1.0
+        norm_DTW(MCA=[1.0, 1.0, 1.0]) = 1.0
+        CORE = 1.0 * 1.0 = 1.0
+        """
+        results = [_qcr("q1", 1.0), _qcr("q2", 1.0)]
+        curve = car_curve(results, thresholds=[0.0, 0.5, 1.0])
+        xs = [c for c, _ in curve]
+        ys = [m for _, m in curve]
+        aucar = trapezoidal_auc(xs, ys)
+        ndtw = normalized_dtw(ys)
+        expected = aucar * ndtw
+        assert core_index(results, thresholds=[0.0, 0.5, 1.0]) == pytest.approx(
+            expected
+        )
