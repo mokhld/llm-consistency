@@ -362,3 +362,76 @@ class ScoredResponse:
             score=float(data["score"]),
             scoring_method=str(data["scoring_method"]),
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class QuestionConsistencyResult:
+    """Two-axis consistency result for a single question.
+
+    Carries both the CAT-faithful correctness rate (``rc_correct``) and
+    the answer agreement rate (``rc_agree``), enabling analysis of
+    stable-but-wrong vs unstable-but-sometimes-right patterns.
+
+    The ``answer_distribution`` field uses ``hash=False`` so the dict
+    is excluded from the hash (making the instance hashable) while
+    still participating in equality comparisons.
+
+    Attributes:
+        question_id: Back-reference to the originating question.
+        rc_correct: CAT-faithful correctness rate (correct / total).
+        rc_agree: Answer agreement rate (modal frequency / total).
+        total_variants: Total number of perturbed variants evaluated.
+        correct_count: Number of variants answered correctly.
+        answer_distribution: Mapping of extracted answer to count.
+            Excluded from hash but included in equality.
+        scored_responses: Tuple of ScoredResponse instances for full
+            response data embedding.
+    """
+
+    question_id: str
+    rc_correct: float
+    rc_agree: float
+    total_variants: int
+    correct_count: int
+    answer_distribution: dict[str, int] = field(default_factory=dict, hash=False)
+    scored_responses: tuple[ScoredResponse, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary.
+
+        ``answer_distribution`` is serialized as a plain dict.
+        ``scored_responses`` is serialized as a list of dicts.
+        """
+        return {
+            "question_id": self.question_id,
+            "rc_correct": self.rc_correct,
+            "rc_agree": self.rc_agree,
+            "total_variants": self.total_variants,
+            "correct_count": self.correct_count,
+            "answer_distribution": dict(self.answer_distribution),
+            "scored_responses": [sr.to_dict() for sr in self.scored_responses],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> QuestionConsistencyResult:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with QuestionConsistencyResult field keys.
+
+        Returns:
+            A new QuestionConsistencyResult instance.
+        """
+        raw_responses = data.get("scored_responses", [])
+        scored_responses = tuple(ScoredResponse.from_dict(sr) for sr in raw_responses)
+        raw_distribution = data.get("answer_distribution", {})
+        answer_distribution = {str(k): int(v) for k, v in raw_distribution.items()}
+        return cls(
+            question_id=str(data["question_id"]),
+            rc_correct=float(data["rc_correct"]),
+            rc_agree=float(data["rc_agree"]),
+            total_variants=int(data["total_variants"]),
+            correct_count=int(data["correct_count"]),
+            answer_distribution=answer_distribution,
+            scored_responses=scored_responses,
+        )

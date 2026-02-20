@@ -14,6 +14,7 @@ from llm_consistency.types import (
     OpenEndedQuestion,
     PerturbationType,
     PerturbedVariant,
+    QuestionConsistencyResult,
     ScoredResponse,
 )
 
@@ -548,3 +549,193 @@ class TestScoredResponse:
         )
         restored = ScoredResponse.from_dict(json.loads(json.dumps(sr.to_dict())))
         assert sr == restored
+
+
+# --- QuestionConsistencyResult tests ---
+
+
+class TestQuestionConsistencyResult:
+    """Tests for the QuestionConsistencyResult frozen dataclass."""
+
+    def test_question_consistency_result_construction(self) -> None:
+        """Create with all required fields and verify access."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+        )
+        assert qcr.question_id == "q1"
+        assert qcr.rc_correct == 0.8
+        assert qcr.rc_agree == 0.6
+        assert qcr.total_variants == 5
+        assert qcr.correct_count == 4
+
+    def test_question_consistency_result_two_axes(self) -> None:
+        """rc_correct and rc_agree are independent floats in [0, 1]."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=1.0,
+            rc_agree=0.4,
+            total_variants=5,
+            correct_count=5,
+        )
+        # They are independent -- different values
+        assert qcr.rc_correct != qcr.rc_agree
+        assert 0.0 <= qcr.rc_correct <= 1.0
+        assert 0.0 <= qcr.rc_agree <= 1.0
+
+    def test_question_consistency_result_answer_distribution(self) -> None:
+        """answer_distribution dict is accessible and correct."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.6,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=3,
+            answer_distribution={"A": 3, "B": 1, "C": 1},
+        )
+        assert qcr.answer_distribution["A"] == 3
+        assert qcr.answer_distribution["B"] == 1
+        assert qcr.answer_distribution["C"] == 1
+        assert sum(qcr.answer_distribution.values()) == 5
+
+    def test_question_consistency_result_answer_distribution_default_empty(
+        self,
+    ) -> None:
+        """Omit answer_distribution; verify defaults to empty dict."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+        )
+        assert qcr.answer_distribution == {}
+
+    def test_question_consistency_result_scored_responses_default_empty(self) -> None:
+        """Omit scored_responses; verify defaults to empty tuple."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+        )
+        assert qcr.scored_responses == ()
+
+    def test_question_consistency_result_with_scored_responses(self) -> None:
+        """Create with tuple of ScoredResponse instances; verify access and length."""
+        sr1 = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+        )
+        sr2 = ScoredResponse(
+            question_id="q1",
+            is_correct=False,
+            score=0.0,
+            scoring_method="exact_match",
+        )
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.5,
+            rc_agree=0.5,
+            total_variants=2,
+            correct_count=1,
+            scored_responses=(sr1, sr2),
+        )
+        assert len(qcr.scored_responses) == 2
+        assert qcr.scored_responses[0].is_correct is True
+        assert qcr.scored_responses[1].is_correct is False
+
+    def test_question_consistency_result_frozen(self) -> None:
+        """Mutation raises FrozenInstanceError."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+        )
+        with pytest.raises(AttributeError):
+            qcr.rc_correct = 0.9  # type: ignore[misc]
+
+    def test_question_consistency_result_hashable(self) -> None:
+        """hash works despite dict field (hash=False excludes it from hash)."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+            answer_distribution={"A": 3, "B": 2},
+        )
+        assert isinstance(hash(qcr), int)
+
+    def test_question_consistency_result_equality_includes_distribution(self) -> None:
+        """Two instances with different answer_distributions are NOT equal."""
+        qcr1 = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+            answer_distribution={"A": 3, "B": 2},
+        )
+        qcr2 = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+            answer_distribution={"A": 2, "B": 3},
+        )
+        assert qcr1 != qcr2
+
+    def test_question_consistency_result_round_trip(self) -> None:
+        """to_dict -> JSON -> from_dict -> equality; answer_distribution survives."""
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.8,
+            rc_agree=0.6,
+            total_variants=5,
+            correct_count=4,
+            answer_distribution={"A": 3, "B": 1, "C": 1},
+        )
+        restored = QuestionConsistencyResult.from_dict(
+            json.loads(json.dumps(qcr.to_dict()))
+        )
+        assert qcr == restored
+
+    def test_question_consistency_result_round_trip_with_responses(self) -> None:
+        """Full round-trip with populated scored_responses tuple."""
+        sr1 = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+        )
+        sr2 = ScoredResponse(
+            question_id="q1",
+            is_correct=False,
+            score=0.0,
+            scoring_method="exact_match",
+        )
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.5,
+            rc_agree=0.5,
+            total_variants=2,
+            correct_count=1,
+            answer_distribution={"A": 1, "B": 1},
+            scored_responses=(sr1, sr2),
+        )
+        restored = QuestionConsistencyResult.from_dict(
+            json.loads(json.dumps(qcr.to_dict()))
+        )
+        assert qcr == restored
+        assert len(restored.scored_responses) == 2
+        assert restored.scored_responses[0].is_correct is True
