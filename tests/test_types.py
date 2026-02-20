@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
+import llm_consistency
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
 from llm_consistency.types import (
-    KNOWN_SCORERS,
     EvaluationConfig,
     EvaluationReport,
     LLMResponse,
@@ -796,7 +797,7 @@ class TestEvaluationConfig:
 
     def test_evaluation_config_empty_perturbation_types(self) -> None:
         """Empty perturbation_types tuple raises ValidationError."""
-        with pytest.raises(ValidationError, match="[Ee]mpty|[Nn]on-empty|at least"):
+        with pytest.raises(ValidationError, match=r"[Ee]mpty|[Nn]on-empty|at least"):
             EvaluationConfig(
                 model="gpt-4o",
                 provider="openai",
@@ -816,7 +817,7 @@ class TestEvaluationConfig:
             cfg.model = "other"  # type: ignore[misc]
 
     def test_evaluation_config_round_trip(self) -> None:
-        """to_dict -> JSON -> from_dict -> equality; perturbation_types as name strings."""
+        """Round-trip serialization; perturbation_types as name strings."""
         cfg = EvaluationConfig(
             model="gpt-4o",
             provider="openai",
@@ -848,6 +849,67 @@ class TestEvaluationConfig:
         assert cfg.mca_threshold == 1.0
         assert cfg.core_threshold is None
         assert cfg.ci_mode is False
+
+    def test_evaluation_config_empty_model_rejected(self) -> None:
+        """Empty model string raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"model.*non-empty"):
+            EvaluationConfig(
+                model="",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="exact_match",
+            )
+
+    def test_evaluation_config_empty_provider_rejected(self) -> None:
+        """Empty provider string raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"provider.*non-empty"):
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="exact_match",
+            )
+
+    def test_evaluation_config_num_variants_below_one_rejected(self) -> None:
+        """num_variants < 1 raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"num_variants.*>= 1"):
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="exact_match",
+                num_variants=0,
+            )
+
+    def test_evaluation_config_concurrency_below_one_rejected(self) -> None:
+        """concurrency < 1 raises ValidationError."""
+        with pytest.raises(ValidationError, match=r"concurrency.*>= 1"):
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="exact_match",
+                concurrency=0,
+            )
+
+    def test_evaluation_config_mca_threshold_out_of_range_rejected(self) -> None:
+        """mca_threshold outside [0.0, 1.0] raises ValidationError."""
+        with pytest.raises(ValidationError, match="mca_threshold"):
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="exact_match",
+                mca_threshold=1.5,
+            )
+        with pytest.raises(ValidationError, match="mca_threshold"):
+            EvaluationConfig(
+                model="gpt-4o",
+                provider="openai",
+                perturbation_types=(PerturbationType.OPTION_REORDER,),
+                scorer="exact_match",
+                mca_threshold=-0.1,
+            )
 
 
 # --- EvaluationReport tests ---
@@ -914,7 +976,7 @@ class TestEvaluationReport:
         sample_config: EvaluationConfig,
         sample_results: tuple[QuestionConsistencyResult, ...],
     ) -> None:
-        """Results field is the full tuple of QuestionConsistencyResult (not just aggregates)."""
+        """Results field is the full tuple (not just aggregates)."""
         report = EvaluationReport(
             config=sample_config,
             results=sample_results,
@@ -936,8 +998,6 @@ class TestEvaluationReport:
         sample_results: tuple[QuestionConsistencyResult, ...],
     ) -> None:
         """created_at is a valid ISO 8601 string."""
-        from datetime import datetime, timezone
-
         report = EvaluationReport(
             config=sample_config,
             results=sample_results,
@@ -956,9 +1016,7 @@ class TestEvaluationReport:
         sample_config: EvaluationConfig,
         sample_results: tuple[QuestionConsistencyResult, ...],
     ) -> None:
-        """Create without passing created_at; verify auto-generates valid ISO 8601."""
-        from datetime import datetime
-
+        """Auto-generates valid ISO 8601 timestamp."""
         report = EvaluationReport(
             config=sample_config,
             results=sample_results,
@@ -994,7 +1052,7 @@ class TestEvaluationReport:
         sample_config: EvaluationConfig,
         sample_results: tuple[QuestionConsistencyResult, ...],
     ) -> None:
-        """hash works (dict-containing QuestionConsistencyResult uses hash=False on dict fields)."""
+        """hash works despite dict field (hash=False on dict fields)."""
         report = EvaluationReport(
             config=sample_config,
             results=sample_results,
@@ -1029,3 +1087,36 @@ class TestEvaluationReport:
         assert len(restored.results) == 1
         assert restored.results[0].scored_responses[0].is_correct is True
         assert restored.config.model == "gpt-4o"
+
+
+# --- Public API import tests ---
+
+
+class TestPublicAPI:
+    """Tests for public API imports from llm_consistency package."""
+
+    def test_public_api_imports(self) -> None:
+        """All types are importable from llm_consistency."""
+        public_names = [
+            "EvaluationConfig",
+            "EvaluationReport",
+            "KNOWN_SCORERS",
+            "LLMResponse",
+            "MCOption",
+            "MCQuestion",
+            "OpenEndedQuestion",
+            "PerturbationType",
+            "PerturbedVariant",
+            "QuestionConsistencyResult",
+            "ScoredResponse",
+        ]
+        for name in public_names:
+            assert hasattr(llm_consistency, name), (
+                f"{name} not importable from llm_consistency"
+            )
+            assert getattr(llm_consistency, name) is not None
+
+    def test_public_api_exceptions_importable(self) -> None:
+        """Exceptions importable from llm_consistency._exceptions."""
+        assert LLMConsistencyError is not None
+        assert ValidationError is not None

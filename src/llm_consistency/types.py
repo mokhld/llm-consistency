@@ -12,7 +12,7 @@ from llm_consistency._exceptions import ValidationError
 
 def _utc_now_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
-    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+    return _dt.datetime.now(_dt.UTC).isoformat()
 
 
 class PerturbationType(Enum):
@@ -493,10 +493,7 @@ class EvaluationConfig:
             raise ValidationError(msg)
         if self.scorer not in KNOWN_SCORERS:
             sorted_scorers = sorted(KNOWN_SCORERS)
-            msg = (
-                f"Unknown scorer '{self.scorer}'. "
-                f"Known scorers: {sorted_scorers}"
-            )
+            msg = f"Unknown scorer '{self.scorer}'. Known scorers: {sorted_scorers}"
             raise ValidationError(msg)
         if self.num_variants < 1:
             msg = "EvaluationConfig.num_variants must be >= 1"
@@ -614,9 +611,7 @@ class EvaluationReport:
             A new EvaluationReport instance.
         """
         config = EvaluationConfig.from_dict(data["config"])
-        results = tuple(
-            QuestionConsistencyResult.from_dict(r) for r in data["results"]
-        )
+        results = tuple(QuestionConsistencyResult.from_dict(r) for r in data["results"])
         return cls(
             config=config,
             results=results,
