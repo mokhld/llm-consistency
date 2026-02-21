@@ -104,7 +104,7 @@ module = "tests.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["openai.*", "anthropic.*", "ollama.*", "litellm.*"]
+module = ["openai", "openai.*", "anthropic", "anthropic.*", "ollama", "ollama.*", "litellm", "litellm.*"]
 ignore_missing_imports = true
 
 # --- Linting ---
