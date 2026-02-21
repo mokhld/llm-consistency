@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from llm_consistency.scoring import BaseScorer, ExactMatchScorer
 from llm_consistency.types import LLMResponse, MCOption, MCQuestion, ScoredResponse
+
+# CustomScorerAdapter import: will fail until Task 2 implements it.
+# Using pytest.importorskip-style lazy import so existing tests still run.
+try:
+    from llm_consistency.scoring import CustomScorerAdapter
+except ImportError:
+    CustomScorerAdapter = None  # type: ignore[assignment, misc]
 
 
 # ---------------------------------------------------------------------------
@@ -323,3 +332,196 @@ class TestExactMatchScorerQuestionId:
         scorer = ExactMatchScorer()
         result = scorer.score(response, question)
         assert result.question_id == "q2"
+
+
+# ---------------------------------------------------------------------------
+# CustomScorerAdapter tests (SCOR-05)
+# ---------------------------------------------------------------------------
+
+
+class TestCustomScorerAdapterFullSignature:
+    """Tests for CustomScorerAdapter wrapping a full-signature callable."""
+
+    def test_full_callable_returns_scored_response_unchanged(self) -> None:
+        """Full (LLMResponse, MCQuestion) -> ScoredResponse callable returns as-is."""
+        expected = ScoredResponse(
+            question_id="q1",
+            is_correct=True,
+            score=0.95,
+            scoring_method="custom_full",
+        )
+
+        def full_scorer(response: LLMResponse, question: MCQuestion) -> ScoredResponse:
+            return expected
+
+        adapter = CustomScorerAdapter(fn=full_scorer, name="custom_full")
+        question = _make_question_4()
+        response = _make_response("Answer: A")
+        result = adapter.score(response, question)
+        assert result is expected
+        assert result.score == 0.95
+        assert result.scoring_method == "custom_full"
+
+    def test_full_callable_receives_correct_args(self) -> None:
+        """Full callable receives the original LLMResponse and MCQuestion."""
+        received_args: list[object] = []
+
+        def capturing_scorer(
+            response: LLMResponse, question: MCQuestion
+        ) -> ScoredResponse:
+            received_args.extend([response, question])
+            return ScoredResponse(
+                question_id=response.question_id,
+                is_correct=False,
+                score=0.0,
+                scoring_method="capture",
+            )
+
+        adapter = CustomScorerAdapter(fn=capturing_scorer, name="capture")
+        question = _make_question_4()
+        response = _make_response("Answer: A")
+        adapter.score(response, question)
+        assert received_args[0] is response
+        assert received_args[1] is question
+
+
+class TestCustomScorerAdapterSimpleSignature:
+    """Tests for CustomScorerAdapter wrapping a simple (str, str) -> bool callable."""
+
+    def test_simple_callable_correct_answer(self) -> None:
+        """Simple callable with matching answer returns is_correct=True, score=1.0."""
+        adapter = CustomScorerAdapter(
+            fn=lambda extracted, correct: extracted == correct,
+            name="my_scorer",
+            simple=True,
+        )
+        question = _make_question_4()  # A is correct
+        response = _make_response("Answer: A")
+        result = adapter.score(response, question)
+        assert result.is_correct is True
+        assert result.score == 1.0
+        assert result.scoring_method == "my_scorer"
+
+    def test_simple_callable_incorrect_answer(self) -> None:
+        """Simple callable with non-matching answer returns is_correct=False, score=0.0."""
+        adapter = CustomScorerAdapter(
+            fn=lambda extracted, correct: extracted == correct,
+            name="my_scorer",
+            simple=True,
+        )
+        question = _make_question_4()  # A is correct
+        response = _make_response("Answer: B")
+        result = adapter.score(response, question)
+        assert result.is_correct is False
+        assert result.score == 0.0
+
+    def test_simple_callable_unextractable_passes_empty_string(self) -> None:
+        """When extraction fails, empty string is passed to simple callable."""
+        received: list[str] = []
+
+        def tracking_fn(extracted: str, correct: str) -> bool:
+            received.append(extracted)
+            return extracted == correct
+
+        adapter = CustomScorerAdapter(fn=tracking_fn, name="tracker", simple=True)
+        question = _make_question_4()
+        response = _make_response("I don't know the answer")
+        result = adapter.score(response, question)
+        assert received[0] == ""
+        assert result.is_correct is False
+
+    def test_simple_callable_question_id_propagated(self) -> None:
+        """ScoredResponse.question_id comes from the response."""
+        adapter = CustomScorerAdapter(
+            fn=lambda e, c: True,
+            name="always_right",
+            simple=True,
+        )
+        question = _make_question_4()
+        response = _make_response("A", question_id="q42")
+        result = adapter.score(response, question)
+        assert result.question_id == "q42"
+
+
+class TestCustomScorerAdapterName:
+    """Tests for CustomScorerAdapter.name property."""
+
+    def test_custom_name(self) -> None:
+        """CustomScorerAdapter returns the user-supplied name."""
+        adapter = CustomScorerAdapter(
+            fn=lambda r, q: ScoredResponse(
+                question_id="x", is_correct=False, score=0.0, scoring_method="x"
+            ),
+            name="custom_fuzzy",
+        )
+        assert adapter.name == "custom_fuzzy"
+
+    def test_default_name(self) -> None:
+        """CustomScorerAdapter defaults to 'custom' if no name given."""
+        adapter = CustomScorerAdapter(
+            fn=lambda r, q: ScoredResponse(
+                question_id="x", is_correct=False, score=0.0, scoring_method="x"
+            ),
+        )
+        assert adapter.name == "custom"
+
+
+class TestCustomScorerAdapterInheritance:
+    """Tests for CustomScorerAdapter inheritance from BaseScorer."""
+
+    def test_isinstance_base_scorer(self) -> None:
+        """CustomScorerAdapter is an instance of BaseScorer."""
+        adapter = CustomScorerAdapter(
+            fn=lambda r, q: ScoredResponse(
+                question_id="x", is_correct=False, score=0.0, scoring_method="x"
+            ),
+        )
+        assert isinstance(adapter, BaseScorer)
+
+
+class TestCustomScorerAdapterFullCallableReturnValidation:
+    """Tests for full callable return type validation."""
+
+    def test_full_callable_non_scored_response_raises(self) -> None:
+        """Full callable returning non-ScoredResponse raises TypeError."""
+
+        def bad_scorer(response: LLMResponse, question: MCQuestion) -> bool:  # type: ignore[override]
+            return True
+
+        adapter = CustomScorerAdapter(fn=bad_scorer, name="bad")  # type: ignore[arg-type]
+        question = _make_question_4()
+        response = _make_response("Answer: A")
+        with pytest.raises(TypeError, match="ScoredResponse"):
+            adapter.score(response, question)
+
+
+# ---------------------------------------------------------------------------
+# Public API tests (scoring exports)
+# ---------------------------------------------------------------------------
+
+
+class TestScoringPublicAPI:
+    """Tests for scoring class availability in llm_consistency public API."""
+
+    def test_base_scorer_importable(self) -> None:
+        """BaseScorer is importable from llm_consistency top-level."""
+        mod = importlib.import_module("llm_consistency")
+        assert hasattr(mod, "BaseScorer")
+
+    def test_exact_match_scorer_importable(self) -> None:
+        """ExactMatchScorer is importable from llm_consistency top-level."""
+        mod = importlib.import_module("llm_consistency")
+        assert hasattr(mod, "ExactMatchScorer")
+
+    def test_custom_scorer_adapter_importable(self) -> None:
+        """CustomScorerAdapter is importable from llm_consistency top-level."""
+        mod = importlib.import_module("llm_consistency")
+        assert hasattr(mod, "CustomScorerAdapter")
+
+    def test_scoring_classes_in_all(self) -> None:
+        """BaseScorer, ExactMatchScorer, CustomScorerAdapter are in __all__."""
+        mod = importlib.import_module("llm_consistency")
+        all_names = mod.__all__
+        assert "BaseScorer" in all_names
+        assert "ExactMatchScorer" in all_names
+        assert "CustomScorerAdapter" in all_names
