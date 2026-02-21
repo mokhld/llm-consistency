@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from llm_consistency.types import LLMResponse, MCQuestion, ScoredResponse
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class BaseScorer(ABC):
@@ -160,3 +164,105 @@ class ExactMatchScorer(BaseScorer):
             score=1.0 if is_correct else 0.0,
             scoring_method=self.name,
         )
+
+
+class CustomScorerAdapter(BaseScorer):
+    """Adapter that wraps a user-supplied callable as a scorer.
+
+    Supports two callable signatures:
+
+    **Full signature** (default, ``simple=False``):
+        ``(LLMResponse, MCQuestion) -> ScoredResponse``
+        The callable receives the full response and question objects
+        and must return a ``ScoredResponse`` directly.
+
+    **Simple signature** (``simple=True``):
+        ``(str, str) -> bool``
+        The callable receives ``(extracted_answer, correct_label)``
+        strings. The adapter handles MC answer extraction and wraps
+        the boolean result into a ``ScoredResponse``.
+
+    Args:
+        fn: The scoring callable to wrap.
+        name: Scorer identifier (default ``"custom"``).
+        simple: If ``True``, treat *fn* as a simple
+            ``(str, str) -> bool`` callable.
+
+    Example::
+
+        # Full signature
+        def my_scorer(resp, q):
+            return ScoredResponse(...)
+        adapter = CustomScorerAdapter(fn=my_scorer, name="my_scorer")
+
+        # Simple signature
+        adapter = CustomScorerAdapter(
+            fn=lambda extracted, correct: extracted == correct,
+            name="simple_match",
+            simple=True,
+        )
+    """
+
+    def __init__(
+        self,
+        fn: Callable[..., ScoredResponse | bool],
+        *,
+        name: str = "custom",
+        simple: bool = False,
+    ) -> None:
+        """Initialize with a scoring callable.
+
+        Args:
+            fn: The callable to wrap as a scorer.
+            name: Scorer identifier (default ``"custom"``).
+            simple: If ``True``, *fn* is treated as
+                ``(str, str) -> bool``.
+        """
+        self._fn = fn
+        self._name = name
+        self._simple = simple
+
+    @property
+    def name(self) -> str:
+        """Return the user-supplied scorer name."""
+        return self._name
+
+    def score(
+        self,
+        response: LLMResponse,
+        question: MCQuestion,
+    ) -> ScoredResponse:
+        """Score a response using the wrapped callable.
+
+        Args:
+            response: The raw LLM response to score.
+            question: The original MC question.
+
+        Returns:
+            A ``ScoredResponse`` -- either directly from a full-signature
+            callable or wrapped from a simple callable's boolean result.
+
+        Raises:
+            TypeError: If a full-signature callable returns something
+                other than ``ScoredResponse``.
+        """
+        if self._simple:
+            valid_labels = frozenset(o.label for o in question.options)
+            extracted = _extract_mc_answer(response.raw_output, valid_labels)
+            correct_label = _get_correct_label(question)
+            is_correct = bool(self._fn(extracted or "", correct_label))
+            return ScoredResponse(
+                question_id=response.question_id,
+                is_correct=is_correct,
+                score=1.0 if is_correct else 0.0,
+                scoring_method=self._name,
+            )
+
+        result = self._fn(response, question)
+        if not isinstance(result, ScoredResponse):
+            msg = (
+                f"Full-signature scorer must return ScoredResponse, "
+                f"got {type(result).__name__}"
+            )
+            raise TypeError(msg)
+        return result

@@ -28,6 +28,11 @@ from llm_consistency.perturbations import (
 from llm_consistency.perturbations import (
     register as register_perturbation,
 )
+from llm_consistency.scoring import (
+    BaseScorer,
+    CustomScorerAdapter,
+    ExactMatchScorer,
+)
 from llm_consistency.types import (
     KNOWN_SCORERS,
     EvaluationConfig,
@@ -45,8 +50,11 @@ from llm_consistency.types import (
 __all__ = [
     "KNOWN_SCORERS",
     "BasePerturbation",
+    "BaseScorer",
+    "CustomScorerAdapter",
     "EvaluationConfig",
     "EvaluationReport",
+    "ExactMatchScorer",
     "FormatChangePerturbation",
     "LLMConsistencyError",
     "LLMResponse",

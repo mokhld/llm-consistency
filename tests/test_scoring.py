@@ -6,15 +6,8 @@ import importlib
 
 import pytest
 
-from llm_consistency.scoring import BaseScorer, ExactMatchScorer
+from llm_consistency.scoring import BaseScorer, CustomScorerAdapter, ExactMatchScorer
 from llm_consistency.types import LLMResponse, MCOption, MCQuestion, ScoredResponse
-
-# CustomScorerAdapter import: will fail until Task 2 implements it.
-# Using pytest.importorskip-style lazy import so existing tests still run.
-try:
-    from llm_consistency.scoring import CustomScorerAdapter
-except ImportError:
-    CustomScorerAdapter = None  # type: ignore[assignment, misc]
 
 
 # ---------------------------------------------------------------------------
