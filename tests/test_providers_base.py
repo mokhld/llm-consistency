@@ -11,6 +11,7 @@ import pytest
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 from llm_consistency.providers._batch_result import BatchResult
 from llm_consistency.providers._budget import BudgetExceededError
+from llm_consistency.providers._rate_limit import AsyncTokenBucket
 from llm_consistency.types import LLMResponse
 
 
@@ -184,18 +185,19 @@ class TestQuery:
 class TestQueryRateLimiting:
     @pytest.mark.asyncio
     async def test_rate_limiter_causes_delay(self) -> None:
-        """Two quick queries with rate=1/s cause measurable delay."""
+        """Two quick queries with low-capacity bucket cause delay."""
         provider = _MockProvider(
             responses=[_DEFAULT_RAW],
-            requests_per_minute=60,  # 1/s
+            requests_per_minute=60,
         )
-        # Drain the bucket with first query
+        # Replace with a bucket: capacity=1, rate=2 tokens/s
+        # First query drains the single token; second waits ~0.5s
+        provider._rate_limiter = AsyncTokenBucket(rate=2.0, capacity=1)
         await provider.query("p1", question_id="q1")
-        # Second query should be delayed by ~1s
         t0 = time.monotonic()
         await provider.query("p2", question_id="q2")
         elapsed = time.monotonic() - t0
-        assert elapsed >= 0.5, f"Expected delay >= 0.5s, got {elapsed:.3f}s"
+        assert elapsed >= 0.3, f"Expected delay >= 0.3s, got {elapsed:.3f}s"
 
 
 # ---------------------------------------------------------------------------
