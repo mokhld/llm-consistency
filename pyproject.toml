@@ -103,6 +103,10 @@ warn_unused_configs = true
 module = "tests.*"
 disallow_untyped_defs = false
 
+[[tool.mypy.overrides]]
+module = ["openai.*", "anthropic.*", "ollama.*", "litellm.*"]
+ignore_missing_imports = true
+
 # --- Linting ---
 
 [tool.ruff]
