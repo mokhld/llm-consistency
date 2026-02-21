@@ -320,9 +320,7 @@ class TestOptionReorderCore:
 class TestOptionReorderNSampling:
     """Tests for N-sampling behavior."""
 
-    def test_option_reorder_n_sampling(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_option_reorder_n_sampling(self, sample_question: MCQuestion) -> None:
         """With n=5, expect exactly 5 variants."""
         pert = OptionReorderPerturbation()
         variants = pert.generate_variants(sample_question, seed=42, n=5)
@@ -367,9 +365,7 @@ class TestOptionReorderMetadata:
         pert = OptionReorderPerturbation()
         assert pert.perturbation_type == PerturbationType.OPTION_REORDER
 
-    def test_option_reorder_variant_metadata(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_option_reorder_variant_metadata(self, sample_question: MCQuestion) -> None:
         """Each variant has correct provenance metadata."""
         pert = OptionReorderPerturbation()
         seed = 42
@@ -408,9 +404,7 @@ class TestOptionReorderEdgeCases:
 class TestFormatChangeCore:
     """Core behavior tests for FormatChangePerturbation."""
 
-    def test_format_change_returns_variants(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_format_change_returns_variants(self, sample_question: MCQuestion) -> None:
         """With n=None, returns at least 6 variants (one per template)."""
         pert = FormatChangePerturbation()
         variants = pert.generate_variants(sample_question, seed=0)
@@ -422,9 +416,7 @@ class TestFormatChangeCore:
             for opt in sample_question.options:
                 assert opt.text in v.stem
 
-    def test_format_change_templates_differ(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_format_change_templates_differ(self, sample_question: MCQuestion) -> None:
         """All returned variant stems must be distinct from each other."""
         pert = FormatChangePerturbation()
         variants = pert.generate_variants(sample_question, seed=0)
@@ -448,9 +440,7 @@ class TestFormatChangeCore:
 class TestFormatChangeNSampling:
     """N-sampling tests for FormatChangePerturbation."""
 
-    def test_format_change_n_sampling(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_format_change_n_sampling(self, sample_question: MCQuestion) -> None:
         """With n=3, returns exactly 3 variants."""
         pert = FormatChangePerturbation()
         variants = pert.generate_variants(sample_question, seed=0, n=3)
@@ -487,9 +477,7 @@ class TestFormatChangeMetadata:
         pert = FormatChangePerturbation()
         assert pert.perturbation_type == PerturbationType.FORMAT_CHANGE
 
-    def test_format_change_variant_metadata(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_format_change_variant_metadata(self, sample_question: MCQuestion) -> None:
         """Each variant has correct metadata. Options is None."""
         pert = FormatChangePerturbation()
         seed = 42
@@ -550,9 +538,7 @@ class TestSeparatorChangeCore:
 class TestSeparatorChangeNSampling:
     """N-sampling tests for SeparatorChangePerturbation."""
 
-    def test_separator_change_n_sampling(
-        self, sample_question: MCQuestion
-    ) -> None:
+    def test_separator_change_n_sampling(self, sample_question: MCQuestion) -> None:
         """With n=3, returns exactly 3 variants."""
         pert = SeparatorChangePerturbation()
         variants = pert.generate_variants(sample_question, seed=0, n=3)
@@ -700,10 +686,7 @@ class TestPublicAPIPerturbationImports:
         assert pkg.BasePerturbation is BasePerturbation
         assert pkg.OptionReorderPerturbation is OptionReorderPerturbation
         assert pkg.FormatChangePerturbation is FormatChangePerturbation
-        assert (
-            pkg.SeparatorChangePerturbation
-            is SeparatorChangePerturbation
-        )
+        assert pkg.SeparatorChangePerturbation is SeparatorChangePerturbation
         # Registry function aliases are callable
         assert callable(pkg.register_perturbation)
         assert callable(pkg.get_perturbation)

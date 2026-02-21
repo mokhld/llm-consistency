@@ -103,11 +103,7 @@ class OptionReorderPerturbation(BasePerturbation):
         identity = tuple(range(num_options))
 
         # All permutations minus the identity
-        all_perms = [
-            p
-            for p in itertools.permutations(identity)
-            if p != identity
-        ]
+        all_perms = [p for p in itertools.permutations(identity) if p != identity]
 
         # N-sampling
         if n is not None and n < len(all_perms):
@@ -186,9 +182,7 @@ def _fmt_tabular(stem: str, options: tuple[MCOption, ...]) -> str:
     return f"{stem}\n{block}"
 
 
-_TEMPLATES: tuple[
-    Callable[[str, tuple[MCOption, ...]], str], ...
-] = (
+_TEMPLATES: tuple[Callable[[str, tuple[MCOption, ...]], str], ...] = (
     _fmt_dot,
     _fmt_paren,
     _fmt_enclosed,
@@ -240,9 +234,7 @@ class FormatChangePerturbation(BasePerturbation):
         Returns:
             A tuple of ``PerturbedVariant`` instances.
         """
-        all_rendered = [
-            tmpl(question.stem, question.options) for tmpl in _TEMPLATES
-        ]
+        all_rendered = [tmpl(question.stem, question.options) for tmpl in _TEMPLATES]
 
         # N-sampling
         if n is not None and n < len(all_rendered):
@@ -270,14 +262,14 @@ class FormatChangePerturbation(BasePerturbation):
 # ---------------------------------------------------------------------------
 
 _SEPARATORS: tuple[str, ...] = (
-    "\n",       # newline
-    "\n\n",     # double newline
-    "; ",       # semicolon
-    ", ",       # comma
-    " | ",      # pipe
-    " - ",      # dash
-    "\t",       # tab
-    " / ",      # slash
+    "\n",  # newline
+    "\n\n",  # double newline
+    "; ",  # semicolon
+    ", ",  # comma
+    " | ",  # pipe
+    " - ",  # dash
+    "\t",  # tab
+    " / ",  # slash
 )
 
 
@@ -375,10 +367,7 @@ def register(
         ValueError: If *name* is already registered and *force* is ``False``.
     """
     if not isinstance(perturbation, BasePerturbation):
-        msg = (
-            f"Expected a BasePerturbation instance, "
-            f"got {type(perturbation).__name__}"
-        )
+        msg = f"Expected a BasePerturbation instance, got {type(perturbation).__name__}"
         raise TypeError(msg)
     if name in _REGISTRY and not force:
         msg = f"Perturbation '{name}' is already registered"
@@ -401,10 +390,7 @@ def get(name: str) -> BasePerturbation:
     """
     if name not in _REGISTRY:
         available = list_registered()
-        msg = (
-            f"Unknown perturbation '{name}'. "
-            f"Available: {available}"
-        )
+        msg = f"Unknown perturbation '{name}'. Available: {available}"
         raise KeyError(msg)
     return _REGISTRY[name]
 

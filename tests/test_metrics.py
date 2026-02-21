@@ -333,18 +333,16 @@ class TestTrapezoidalAUC:
 
         area = 0.5*(1.0+0.75)/2 + 0.5*(0.75+0.25)/2 = 0.4375 + 0.25 = 0.6875
         """
-        assert trapezoidal_auc(
-            [0.0, 0.5, 1.0], [1.0, 0.75, 0.25]
-        ) == pytest.approx(0.6875)
+        assert trapezoidal_auc([0.0, 0.5, 1.0], [1.0, 0.75, 0.25]) == pytest.approx(
+            0.6875
+        )
 
     def test_non_uniform_spacing(self) -> None:
         """Non-uniform x spacing: xs=[0, 0.3, 1.0], ys=[1.0, 1.0, 0.0].
 
         area = 0.3*(1.0+1.0)/2 + 0.7*(1.0+0.0)/2 = 0.3 + 0.35 = 0.65
         """
-        assert trapezoidal_auc(
-            [0.0, 0.3, 1.0], [1.0, 1.0, 0.0]
-        ) == pytest.approx(0.65)
+        assert trapezoidal_auc([0.0, 0.3, 1.0], [1.0, 1.0, 0.0]) == pytest.approx(0.65)
 
     def test_single_point_returns_zero(self) -> None:
         """Fewer than 2 points returns 0.0."""
@@ -361,9 +359,7 @@ class TestTrapezoidalAUC:
 
     def test_all_zeros(self) -> None:
         """All-zero y values produce area 0.0."""
-        assert trapezoidal_auc([0.0, 0.5, 1.0], [0.0, 0.0, 0.0]) == pytest.approx(
-            0.0
-        )
+        assert trapezoidal_auc([0.0, 0.5, 1.0], [0.0, 0.0, 0.0]) == pytest.approx(0.0)
 
     def test_worst_model_aucar(self) -> None:
         """Worst model CAR: y=[1,0,...,0] over default 11 thresholds.
@@ -417,9 +413,7 @@ class TestDTWDistance:
           cost[3][3] = |1-0| + min(1.0, 2.0, 1.0) = 2.0
         DTW = 2.0
         """
-        assert dtw_distance(
-            [1.0, 1.0, 1.0], [1.0, 0.0, 0.0]
-        ) == pytest.approx(2.0)
+        assert dtw_distance([1.0, 1.0, 1.0], [1.0, 0.0, 0.0]) == pytest.approx(2.0)
 
     def test_symmetric(self) -> None:
         """DTW(s, t) == DTW(t, s) for known sequences."""
@@ -531,9 +525,7 @@ class TestCOREIndex:
             _qcr("q3", 0.6),
             _qcr("q4", 0.0),
         ]
-        assert core_index(results, thresholds=[0.0, 0.5, 1.0]) == pytest.approx(
-            0.34375
-        )
+        assert core_index(results, thresholds=[0.0, 0.5, 1.0]) == pytest.approx(0.34375)
 
     def test_core_in_range(self) -> None:
         """CORE values are always in [0.0, 1.0]."""
@@ -700,9 +692,7 @@ class TestBootstrapCI:
             return mca(r, threshold=0.5)
 
         point_estimate = stat(list(results))
-        lower, upper = bootstrap_ci(
-            results, statistic=stat, n_bootstrap=2000, seed=42
-        )
+        lower, upper = bootstrap_ci(results, statistic=stat, n_bootstrap=2000, seed=42)
         assert lower <= point_estimate
         assert upper >= point_estimate
         # CI should have some width for mixed data
@@ -710,9 +700,7 @@ class TestBootstrapCI:
 
     def test_different_seeds_different_results(self) -> None:
         """Different seeds produce different CI bounds."""
-        results = [
-            _qcr(f"q{i}", rc_correct=i / 20) for i in range(21)
-        ]
+        results = [_qcr(f"q{i}", rc_correct=i / 20) for i in range(21)]
 
         def stat(r: list[QuestionConsistencyResult]) -> float:
             return sum(q.rc_correct for q in r) / len(r) if r else 0.0
