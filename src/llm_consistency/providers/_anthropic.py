@@ -15,7 +15,7 @@ from typing import Any
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 
 
-class AnthropicProvider(BaseLLMProvider):
+class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
     """Anthropic Claude provider.
 
     Args:

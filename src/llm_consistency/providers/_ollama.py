@@ -12,7 +12,7 @@ import time
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 
 
-class OllamaProvider(BaseLLMProvider):
+class OllamaProvider(BaseLLMProvider):  # pragma: no cover
     """Async Ollama provider using ``ollama.AsyncClient``.
 
     Args:

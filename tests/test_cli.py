@@ -166,6 +166,29 @@ def test_run_with_yaml_config(tmp_path: Path) -> None:
     assert result.exit_code == 0, f"CLI with config failed: {result.output}"
 
 
+def test_run_with_toml_config(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        'model = "test-model"\n'
+        'provider = "mock"\n'
+        "num_variants = 3\n"
+        "seed = 99\n"
+        'perturbations = ["option_reorder"]\n'
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--config",
+            str(config_path),
+            "--dataset",
+            str(dataset_path),
+        ],
+    )
+    assert result.exit_code == 0, f"CLI with TOML config failed: {result.output}"
+
+
 def test_run_cli_overrides_config(tmp_path: Path) -> None:
     dataset_path = _create_mc_dataset(tmp_path)
     config_path = tmp_path / "eval.yaml"

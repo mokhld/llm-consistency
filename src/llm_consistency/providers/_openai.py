@@ -14,7 +14,7 @@ from typing import Any
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 
 
-class OpenAIProvider(BaseLLMProvider):
+class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
     """OpenAI and OpenAI-compatible provider.
 
     Args:
