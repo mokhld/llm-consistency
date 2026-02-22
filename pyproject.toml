@@ -20,6 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.28.1",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
