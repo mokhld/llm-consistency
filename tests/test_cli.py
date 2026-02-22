@@ -282,3 +282,62 @@ def test_main_entry_point() -> None:
     assert result.exit_code == 0
     # Verify main is callable (entry point)
     assert callable(main_fn)
+
+
+# --- compare subcommand tests (CLI-03) ---
+
+
+def test_compare_help() -> None:
+    result = CliRunner().invoke(cli, ["compare", "--help"])
+    assert result.exit_code == 0
+    assert "--config" in result.output
+    assert "models" in result.output.lower()
+
+
+def test_compare_with_config(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    config_path = tmp_path / "compare.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  - model: test-model-1\n"
+        "    provider: mock\n"
+        "  - model: test-model-2\n"
+        "    provider: mock\n"
+        f"dataset: {dataset_path}\n"
+        "perturbations:\n"
+        "  - option_reorder\n"
+        "num_variants: 3\n"
+        "seed: 42\n"
+    )
+    result = CliRunner().invoke(cli, ["compare", "--config", str(config_path)])
+    assert result.exit_code == 0, f"Compare failed: {result.output}"
+    assert "test-model-1" in result.output
+    assert "test-model-2" in result.output
+
+
+def test_compare_no_config_errors() -> None:
+    result = CliRunner().invoke(cli, ["compare"])
+    assert result.exit_code != 0
+
+
+def test_compare_invalid_config_no_models(tmp_path: Path) -> None:
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text("dataset: something.json\n")
+    result = CliRunner().invoke(cli, ["compare", "--config", str(config_path)])
+    assert result.exit_code != 0
+
+
+# --- perturbations list subcommand tests (CLI-04) ---
+
+
+def test_perturbations_list() -> None:
+    result = CliRunner().invoke(cli, ["perturbations", "list"])
+    assert result.exit_code == 0
+    assert "option_reorder" in result.output
+    assert "format_change" in result.output
+    assert "separator_change" in result.output
+
+
+def test_perturbations_help() -> None:
+    result = CliRunner().invoke(cli, ["perturbations", "--help"])
+    assert result.exit_code == 0

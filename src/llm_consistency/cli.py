@@ -241,6 +241,131 @@ def run(
         export_json(report, Path(output), metadata=runner.last_metadata)
 
 
+# --- perturbations group (CLI-04) ---
+
+
+@cli.group()
+def perturbations() -> None:
+    """Manage perturbation types."""
+
+
+@perturbations.command("list")
+def perturbations_list() -> None:
+    """Show all registered perturbation types."""
+    from llm_consistency.perturbations import list_registered  # noqa: PLC0415
+
+    names = list_registered()
+    if not names:
+        click.echo("No perturbations registered.")
+        return
+    click.echo("Available perturbation types:")
+    for name in names:
+        click.echo(f"  - {name}")
+
+
+# --- compare subcommand (CLI-03) ---
+
+
+@cli.command()
+@click.option(
+    "--config",
+    "-c",
+    required=True,
+    type=click.Path(exists=True),
+    help="Config file with models list (YAML/TOML)",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="JSON output directory for per-model reports",
+)
+@_handle_errors
+def compare(config: str, output: str | None) -> None:
+    """Compare multiple models on the same evaluation."""
+    from pathlib import Path  # noqa: PLC0415
+
+    data = load_config_file(Path(config))
+
+    # Validate models key
+    models = data.get("models")
+    if not models or not isinstance(models, list):
+        msg = "Config must contain 'models' list with 'model' and 'provider' keys"
+        raise click.ClickException(msg)
+    for entry in models:
+        if (
+            not isinstance(entry, dict)
+            or "model" not in entry
+            or "provider" not in entry
+        ):
+            msg = "Config must contain 'models' list with 'model' and 'provider' keys"
+            raise click.ClickException(msg)
+
+    # Extract shared config
+    dataset_path = data.get("dataset")
+    if not dataset_path:
+        msg = "Config must contain 'dataset' path"
+        raise click.ClickException(msg)
+
+    pert_names = tuple(data.get("perturbations", ["option_reorder"]))
+    pert_types = _parse_perturbation_types(pert_names)
+    num_variants: int = int(data.get("num_variants", 5))
+    concurrency: int = int(data.get("concurrency", 10))
+    scorer_name: str = str(data.get("scorer", "exact_match"))
+    seed: int = int(data.get("seed", 42))
+    mca_threshold: float = float(data.get("mca_threshold", 1.0))
+    core_threshold_raw = data.get("core_threshold")
+    core_threshold: float | None = (
+        float(core_threshold_raw) if core_threshold_raw is not None else None
+    )
+    max_budget_raw = data.get("max_budget_usd")
+    max_budget_usd: float | None = (
+        float(max_budget_raw) if max_budget_raw is not None else None
+    )
+
+    # Load dataset once
+    ds = MCDataset.load(dataset_path)
+    scoring = ExactMatchScorer()
+
+    # Run per model sequentially
+    results_list: list[tuple[str, Any]] = []
+    for entry in models:
+        model_name = str(entry["model"])
+        provider_name = str(entry["provider"])
+
+        eval_config = EvaluationConfig(
+            model=model_name,
+            provider=provider_name,
+            perturbation_types=pert_types,
+            scorer=scorer_name,
+            num_variants=num_variants,
+            concurrency=concurrency,
+            max_budget_usd=max_budget_usd,
+            mca_threshold=mca_threshold,
+            core_threshold=core_threshold,
+        )
+
+        prov = get_provider(provider_name, model=model_name)
+        runner = BatchRunner()
+        report = asyncio.run(runner.run(ds, eval_config, prov, scoring, seed=seed))
+        results_list.append((model_name, report))
+
+    # Display comparison summary
+    click.echo("\n--- Comparison Results ---\n")
+    for model_name, report in results_list:
+        click.echo(f"Model: {model_name}")
+        ConsoleReporter().display(report, threshold=mca_threshold)
+        click.echo("")
+
+    # Export per-model JSON if output specified
+    if output:
+        out_dir = Path(output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for model_name, report in results_list:
+            export_json(report, out_dir / f"{model_name}.json")
+
+
 def main() -> None:
     """Entry point for the CLI."""
     cli()
