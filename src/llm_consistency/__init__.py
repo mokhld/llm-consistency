@@ -2,6 +2,12 @@
 
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
 from llm_consistency._version import __version__, __version_tuple__
+from llm_consistency.datasets import (
+    BaseDataset,
+    CustomDataset,
+    MCDataset,
+    OpenEndedDataset,
+)
 from llm_consistency.metrics import (
     agreement_gated_accuracy,
     bootstrap_ci,
@@ -35,6 +41,15 @@ from llm_consistency.providers import (
     estimate_cost,
     get_provider,
 )
+from llm_consistency.reports import (
+    ConsoleReporter,
+    export_json,
+    render_car_ascii,
+)
+from llm_consistency.runners import (
+    BatchRunner,
+    RunMetadata,
+)
 from llm_consistency.scoring import (
     BaseScorer,
     CustomScorerAdapter,
@@ -56,11 +71,15 @@ from llm_consistency.types import (
 
 __all__ = [
     "KNOWN_SCORERS",
+    "BaseDataset",
     "BaseLLMProvider",
     "BasePerturbation",
     "BaseScorer",
     "BatchResult",
+    "BatchRunner",
     "BudgetExceededError",
+    "ConsoleReporter",
+    "CustomDataset",
     "CustomScorerAdapter",
     "EvaluationConfig",
     "EvaluationReport",
@@ -68,13 +87,16 @@ __all__ = [
     "FormatChangePerturbation",
     "LLMConsistencyError",
     "LLMResponse",
+    "MCDataset",
     "MCOption",
     "MCQuestion",
+    "OpenEndedDataset",
     "OpenEndedQuestion",
     "OptionReorderPerturbation",
     "PerturbationType",
     "PerturbedVariant",
     "QuestionConsistencyResult",
+    "RunMetadata",
     "ScoredResponse",
     "SeparatorChangePerturbation",
     "ValidationError",
@@ -87,11 +109,13 @@ __all__ = [
     "core_index",
     "dtw_distance",
     "estimate_cost",
+    "export_json",
     "get_perturbation",
     "get_provider",
     "list_registered_perturbations",
     "mca",
     "normalized_dtw",
     "register_perturbation",
+    "render_car_ascii",
     "trapezoidal_auc",
 ]
