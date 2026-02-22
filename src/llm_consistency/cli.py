@@ -50,6 +50,8 @@ def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
             raise click.ClickException(
                 f"Configuration error: missing key {exc}"
             ) from None
+        except TypeError as exc:
+            raise click.ClickException(f"Invalid data format: {exc}") from None
 
     return wrapper
 
@@ -364,6 +366,34 @@ def compare(config: str, output: str | None) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         for model_name, report in results_list:
             export_json(report, out_dir / f"{model_name}.json")
+
+
+# --- dataset group (CLI-05) ---
+
+
+@cli.group()
+def dataset() -> None:
+    """Dataset management commands."""
+
+
+@dataset.command("validate")
+@click.argument("path", type=click.Path(exists=True))
+@click.option(
+    "--type",
+    "dataset_type",
+    type=click.Choice(["mc", "open-ended"]),
+    default="mc",
+    help="Dataset type",
+)
+@_handle_errors
+def dataset_validate(path: str, dataset_type: str) -> None:
+    """Validate a dataset file format."""
+    from llm_consistency.datasets import (  # noqa: PLC0415
+        OpenEndedDataset,
+    )
+
+    ds = MCDataset.load(path) if dataset_type == "mc" else OpenEndedDataset.load(path)
+    click.echo(f"Valid {dataset_type} dataset: {len(ds)} questions")
 
 
 def main() -> None:

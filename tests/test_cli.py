@@ -341,3 +341,75 @@ def test_perturbations_list() -> None:
 def test_perturbations_help() -> None:
     result = CliRunner().invoke(cli, ["perturbations", "--help"])
     assert result.exit_code == 0
+
+
+# --- dataset validate subcommand tests (CLI-05) ---
+
+
+def _create_open_ended_dataset(tmp_path: Path) -> Path:
+    """Create a valid open-ended dataset JSON file for testing."""
+    dataset = {
+        "questions": [
+            {
+                "id": "q1",
+                "stem": "Explain gravity",
+                "reference_answers": [
+                    "Force of attraction between masses",
+                ],
+            },
+            {
+                "id": "q2",
+                "stem": "What is photosynthesis?",
+                "reference_answers": [
+                    "Process by which plants convert light to energy",
+                ],
+            },
+        ]
+    }
+    path = tmp_path / "open_ended.json"
+    path.write_text(json.dumps(dataset))
+    return path
+
+
+def test_dataset_validate_mc_valid(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(cli, ["dataset", "validate", str(dataset_path)])
+    assert result.exit_code == 0, f"Validate failed: {result.output}"
+    assert "Valid" in result.output
+    assert "2 questions" in result.output
+
+
+def test_dataset_validate_mc_with_type_flag(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["dataset", "validate", "--type", "mc", str(dataset_path)]
+    )
+    assert result.exit_code == 0
+
+
+def test_dataset_validate_open_ended(tmp_path: Path) -> None:
+    dataset_path = _create_open_ended_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["dataset", "validate", "--type", "open-ended", str(dataset_path)],
+    )
+    assert result.exit_code == 0
+    assert "Valid" in result.output
+
+
+def test_dataset_validate_invalid_file(tmp_path: Path) -> None:
+    bad_path = tmp_path / "bad.json"
+    bad_path.write_text(json.dumps([{"bad": "data"}]))
+    result = CliRunner().invoke(cli, ["dataset", "validate", str(bad_path)])
+    assert result.exit_code != 0
+    assert "Error" in result.output
+
+
+def test_dataset_validate_nonexistent_file() -> None:
+    result = CliRunner().invoke(cli, ["dataset", "validate", "/nonexistent/path.json"])
+    assert result.exit_code != 0
+
+
+def test_dataset_help() -> None:
+    result = CliRunner().invoke(cli, ["dataset", "--help"])
+    assert result.exit_code == 0
