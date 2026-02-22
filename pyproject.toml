@@ -19,7 +19,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "click>=8.1",
     "httpx>=0.28.1",
+    "pyyaml>=6.0",
     "rich>=13.0",
 ]
 
@@ -47,6 +49,7 @@ lint = [
 ]
 type = [
     "mypy>=1.19.1",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 dev = [
     {include-group = "test"},
