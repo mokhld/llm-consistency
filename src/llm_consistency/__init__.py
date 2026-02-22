@@ -48,7 +48,9 @@ from llm_consistency.reports import (
 )
 from llm_consistency.runners import (
     BatchRunner,
+    CIRunner,
     RunMetadata,
+    StreamingRunner,
 )
 from llm_consistency.scoring import (
     BaseScorer,
@@ -78,6 +80,7 @@ __all__ = [
     "BatchResult",
     "BatchRunner",
     "BudgetExceededError",
+    "CIRunner",
     "ConsoleReporter",
     "CustomDataset",
     "CustomScorerAdapter",
@@ -99,6 +102,7 @@ __all__ = [
     "RunMetadata",
     "ScoredResponse",
     "SeparatorChangePerturbation",
+    "StreamingRunner",
     "ValidationError",
     "__version__",
     "__version_tuple__",
