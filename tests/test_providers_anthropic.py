@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import sys
 from types import SimpleNamespace
@@ -101,7 +100,8 @@ class TestConstructor:
         call_kwargs = mock_mod.AsyncAnthropic.call_args[1]
         assert call_kwargs["api_key"] == "sk-ant-test"
 
-    def test_max_tokens_defaults_to_1024(self) -> None:
+    @pytest.mark.asyncio
+    async def test_max_tokens_defaults_to_1024(self) -> None:
         mock_mod = _mock_anthropic_module()
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
@@ -110,14 +110,13 @@ class TestConstructor:
         mock_mod.AsyncAnthropic.return_value = mock_client
         provider = _make_provider(mock_mod)
 
-        asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        await provider._send_request("prompt")  # type: ignore[union-attr]
 
         call_kwargs = mock_client.messages.create.call_args[1]
         assert call_kwargs["max_tokens"] == 1024
 
-    def test_max_tokens_can_be_overridden(self) -> None:
+    @pytest.mark.asyncio
+    async def test_max_tokens_can_be_overridden(self) -> None:
         mock_mod = _mock_anthropic_module()
         mock_client = MagicMock()
         mock_client.messages.create = AsyncMock(
@@ -126,9 +125,7 @@ class TestConstructor:
         mock_mod.AsyncAnthropic.return_value = mock_client
         provider = _make_provider(mock_mod, max_tokens=2048)
 
-        asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        await provider._send_request("prompt")  # type: ignore[union-attr]
 
         call_kwargs = mock_client.messages.create.call_args[1]
         assert call_kwargs["max_tokens"] == 2048
@@ -172,14 +169,13 @@ class TestSendRequest:
         provider = _make_provider(mock_mod, **kwargs)
         return provider, mock_client
 
-    def test_maps_response_correctly(self) -> None:
+    @pytest.mark.asyncio
+    async def test_maps_response_correctly(self) -> None:
         provider, _ = self._provider_with_mock_client(
             _mock_response(text="B", input_tokens=15, output_tokens=8),
         )
 
-        raw = asyncio.get_event_loop().run_until_complete(
-            provider._send_request("What is 2+2?"),  # type: ignore[union-attr]
-        )
+        raw = await provider._send_request("What is 2+2?")  # type: ignore[union-attr]
 
         assert isinstance(raw, _RawResponse)
         assert raw.content == "B"
@@ -187,13 +183,12 @@ class TestSendRequest:
         assert raw.completion_tokens == 8
         assert raw.latency_ms > 0
 
-    def test_system_as_top_level_param(self) -> None:
+    @pytest.mark.asyncio
+    async def test_system_as_top_level_param(self) -> None:
         """Anthropic uses system as a top-level kwarg, NOT in messages."""
         provider, mock_client = self._provider_with_mock_client()
 
-        asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt", system="Be helpful"),  # type: ignore[union-attr]
-        )
+        await provider._send_request("prompt", system="Be helpful")  # type: ignore[union-attr]
 
         call_kwargs = mock_client.messages.create.call_args[1]
         assert call_kwargs["system"] == "Be helpful"
@@ -202,13 +197,12 @@ class TestSendRequest:
         assert len(messages) == 1
         assert messages[0] == {"role": "user", "content": "prompt"}
 
-    def test_no_system_param_when_none(self) -> None:
+    @pytest.mark.asyncio
+    async def test_no_system_param_when_none(self) -> None:
         """When system is None, it should not be in kwargs at all."""
         provider, mock_client = self._provider_with_mock_client()
 
-        asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        await provider._send_request("prompt")  # type: ignore[union-attr]
 
         call_kwargs = mock_client.messages.create.call_args[1]
         assert "system" not in call_kwargs
@@ -216,26 +210,24 @@ class TestSendRequest:
         assert len(messages) == 1
         assert messages[0] == {"role": "user", "content": "prompt"}
 
-    def test_maps_input_output_tokens(self) -> None:
+    @pytest.mark.asyncio
+    async def test_maps_input_output_tokens(self) -> None:
         """Anthropic uses input_tokens/output_tokens, not prompt_tokens."""
         provider, _ = self._provider_with_mock_client(
             _mock_response(input_tokens=42, output_tokens=17),
         )
 
-        raw = asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.prompt_tokens == 42
         assert raw.completion_tokens == 17
 
-    def test_handles_empty_content(self) -> None:
+    @pytest.mark.asyncio
+    async def test_handles_empty_content(self) -> None:
         provider, _ = self._provider_with_mock_client(
             _mock_response(empty_content=True),
         )
 
-        raw = asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.content == ""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import sys
 from types import SimpleNamespace
@@ -137,14 +136,13 @@ class TestSendRequest:
         provider = _make_provider(mock_mod)
         return provider, mock_client
 
-    def test_maps_response_correctly(self) -> None:
+    @pytest.mark.asyncio
+    async def test_maps_response_correctly(self) -> None:
         provider, _ = self._provider_with_mock_client(
             _mock_response(content="B", prompt_tokens=15, completion_tokens=8),
         )
 
-        raw = asyncio.get_event_loop().run_until_complete(
-            provider._send_request("What is 2+2?"),  # type: ignore[union-attr]
-        )
+        raw = await provider._send_request("What is 2+2?")  # type: ignore[union-attr]
 
         assert isinstance(raw, _RawResponse)
         assert raw.content == "B"
@@ -152,12 +150,11 @@ class TestSendRequest:
         assert raw.completion_tokens == 8
         assert raw.latency_ms > 0
 
-    def test_builds_messages_with_system(self) -> None:
+    @pytest.mark.asyncio
+    async def test_builds_messages_with_system(self) -> None:
         provider, mock_client = self._provider_with_mock_client()
 
-        asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt", system="Be helpful"),  # type: ignore[union-attr]
-        )
+        await provider._send_request("prompt", system="Be helpful")  # type: ignore[union-attr]
 
         call_kwargs = mock_client.chat.completions.create.call_args[1]
         messages = call_kwargs["messages"]
@@ -165,37 +162,34 @@ class TestSendRequest:
         assert messages[0] == {"role": "system", "content": "Be helpful"}
         assert messages[1] == {"role": "user", "content": "prompt"}
 
-    def test_builds_messages_without_system(self) -> None:
+    @pytest.mark.asyncio
+    async def test_builds_messages_without_system(self) -> None:
         provider, mock_client = self._provider_with_mock_client()
 
-        asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        await provider._send_request("prompt")  # type: ignore[union-attr]
 
         call_kwargs = mock_client.chat.completions.create.call_args[1]
         messages = call_kwargs["messages"]
         assert len(messages) == 1
         assert messages[0] == {"role": "user", "content": "prompt"}
 
-    def test_handles_none_usage(self) -> None:
+    @pytest.mark.asyncio
+    async def test_handles_none_usage(self) -> None:
         provider, _ = self._provider_with_mock_client(
             _mock_response(prompt_tokens=None, completion_tokens=None),
         )
 
-        raw = asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.prompt_tokens is None
         assert raw.completion_tokens is None
 
-    def test_handles_none_content(self) -> None:
+    @pytest.mark.asyncio
+    async def test_handles_none_content(self) -> None:
         provider, _ = self._provider_with_mock_client(
             _mock_response(content=None),
         )
 
-        raw = asyncio.get_event_loop().run_until_complete(
-            provider._send_request("prompt"),  # type: ignore[union-attr]
-        )
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.content == ""
