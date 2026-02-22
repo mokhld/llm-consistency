@@ -26,6 +26,7 @@ _PROVIDER_REGISTRY: dict[str, str] = {
     "anthropic": "llm_consistency.providers._anthropic",
     "ollama": "llm_consistency.providers._ollama",
     "litellm": "llm_consistency.providers._litellm",
+    "mock": "llm_consistency.providers._mock",
 }
 
 _PROVIDER_CLASS_NAMES: dict[str, str] = {
@@ -33,6 +34,7 @@ _PROVIDER_CLASS_NAMES: dict[str, str] = {
     "anthropic": "AnthropicProvider",
     "ollama": "OllamaProvider",
     "litellm": "LiteLLMProvider",
+    "mock": "MockLLMProvider",
 }
 
 

@@ -6,6 +6,8 @@ Supports three response modes: default, response map, and cycling list.
 
 from __future__ import annotations
 
+from typing_extensions import override
+
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 from llm_consistency.types import LLMResponse
 
@@ -72,11 +74,12 @@ class MockLLMProvider(BaseLLMProvider):
         """Return ``'mock'``."""
         return "mock"
 
+    @override
     async def _send_request(
         self,
-        _prompt: str,
+        prompt: str,
         *,
-        _system: str | None = None,
+        system: str | None = None,
     ) -> _RawResponse:
         """Satisfy the ABC contract.
 
@@ -90,12 +93,13 @@ class MockLLMProvider(BaseLLMProvider):
             latency_ms=0.1,
         )
 
+    @override
     async def query(
         self,
-        _prompt: str,
+        prompt: str,
         question_id: str,
         *,
-        _system: str | None = None,
+        system: str | None = None,
     ) -> LLMResponse:
         """Return a deterministic response based on the configured mode.
 
@@ -103,9 +107,9 @@ class MockLLMProvider(BaseLLMProvider):
         mock).  Directly constructs an :class:`LLMResponse`.
 
         Args:
-            _prompt: The user prompt (ignored for response selection).
+            prompt: The user prompt (ignored for response selection).
             question_id: Back-reference for response-map lookup.
-            _system: Optional system message (ignored).
+            system: Optional system message (ignored).
 
         Returns:
             An :class:`LLMResponse` with deterministic content.
