@@ -35,7 +35,6 @@ def _create_mc_dataset(tmp_path: Path) -> Path:
     return dataset_path
 
 
-# --- CLI group and version tests (CLI-01) ---
 
 
 def test_cli_help() -> None:
@@ -57,7 +56,6 @@ def test_cli_version() -> None:
     assert "version" in result.output.lower()
 
 
-# --- run subcommand tests (CLI-02) ---
 
 
 def test_run_help() -> None:
@@ -142,7 +140,6 @@ def test_run_with_json_output(tmp_path: Path) -> None:
     assert "results" in data
 
 
-# --- Config file support tests (CLI-06) ---
 
 
 def test_run_with_yaml_config(tmp_path: Path) -> None:
@@ -212,7 +209,6 @@ def test_run_cli_overrides_config(tmp_path: Path) -> None:
     assert result.exit_code == 0, f"CLI override failed: {result.output}"
 
 
-# --- Error handling tests (CLI-07) ---
 
 
 def test_run_missing_dataset_file() -> None:
@@ -307,7 +303,6 @@ def test_main_entry_point() -> None:
     assert callable(main_fn)
 
 
-# --- compare subcommand tests (CLI-03) ---
 
 
 def test_compare_help() -> None:
@@ -350,7 +345,6 @@ def test_compare_invalid_config_no_models(tmp_path: Path) -> None:
     assert result.exit_code != 0
 
 
-# --- perturbations list subcommand tests (CLI-04) ---
 
 
 def test_perturbations_list() -> None:
@@ -366,7 +360,6 @@ def test_perturbations_help() -> None:
     assert result.exit_code == 0
 
 
-# --- dataset validate subcommand tests (CLI-05) ---
 
 
 def _create_open_ended_dataset(tmp_path: Path) -> Path:

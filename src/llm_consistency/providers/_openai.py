@@ -18,7 +18,7 @@ class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
     """OpenAI and OpenAI-compatible provider.
 
     Args:
-        model: Model identifier (e.g., ``"gpt-4o"``).
+        model: Model identifier (e.g., ``"gpt-5-mini"``).
         api_key: OpenAI API key, or ``None`` to use env default.
         base_url: Custom API endpoint for OpenAI-compatible servers.
         **kwargs: Forwarded to :class:`BaseLLMProvider`.
@@ -69,7 +69,7 @@ class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
         t0 = time.monotonic()
         response = await self._client.chat.completions.create(
             model=self._model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
         )
         latency_ms = (time.monotonic() - t0) * 1000
 
