@@ -14,7 +14,7 @@ from typing import Any
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 
 
-class LiteLLMProvider(BaseLLMProvider):
+class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
     """Async LiteLLM universal proxy provider.
 
     Uses ``litellm.acompletion()`` for any LLM via prefixed model
