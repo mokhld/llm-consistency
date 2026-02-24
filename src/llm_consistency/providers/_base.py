@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from llm_consistency.providers._batch_result import BatchResult
 from llm_consistency.providers._budget import BudgetTracker
+from llm_consistency.providers._cost import get_model_pricing
 from llm_consistency.providers._rate_limit import AsyncTokenBucket
 from llm_consistency.providers._retry import retry_with_backoff
 from llm_consistency.types import LLMResponse
@@ -147,8 +148,10 @@ class BaseLLMProvider(ABC):
             BudgetExceededError: If the budget ceiling is exceeded.
             TimeoutError: If the request exceeds ``request_timeout_s``.
         """
-        # 1. Check budget
-        await self._budget.check(estimated_cost=0.0)
+        # 1. Check budget (use pricing if available)
+        pricing = get_model_pricing(self._model)
+        estimated_cost = pricing.estimate(200, 50) if pricing is not None else 0.0
+        await self._budget.check(estimated_cost=estimated_cost)
 
         # 2. Acquire rate-limit token
         await self._rate_limiter.acquire()
@@ -179,8 +182,16 @@ class BaseLLMProvider(ABC):
             completion_tokens=raw.completion_tokens,
         )
 
-        # 5. Record actual cost (placeholder 0.0)
-        await self._budget.record(actual_cost=0.0)
+        # 5. Record actual cost
+        if (
+            pricing is not None
+            and raw.prompt_tokens is not None
+            and raw.completion_tokens is not None
+        ):
+            actual_cost = pricing.estimate(raw.prompt_tokens, raw.completion_tokens)
+        else:
+            actual_cost = 0.0
+        await self._budget.record(actual_cost=actual_cost)
 
         return response
 

@@ -28,6 +28,13 @@ from llm_consistency.perturbations import (
 from llm_consistency.perturbations import (
     register as register_perturbation,
 )
+from llm_consistency.providers import (
+    BaseLLMProvider,
+    BatchResult,
+    BudgetExceededError,
+    estimate_cost,
+    get_provider,
+)
 from llm_consistency.scoring import (
     BaseScorer,
     CustomScorerAdapter,
@@ -49,8 +56,11 @@ from llm_consistency.types import (
 
 __all__ = [
     "KNOWN_SCORERS",
+    "BaseLLMProvider",
     "BasePerturbation",
     "BaseScorer",
+    "BatchResult",
+    "BudgetExceededError",
     "CustomScorerAdapter",
     "EvaluationConfig",
     "EvaluationReport",
@@ -76,7 +86,9 @@ __all__ = [
     "car_curve",
     "core_index",
     "dtw_distance",
+    "estimate_cost",
     "get_perturbation",
+    "get_provider",
     "list_registered_perturbations",
     "mca",
     "normalized_dtw",
