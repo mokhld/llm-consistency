@@ -1,1 +1,25 @@
+# Planning (GSD)
 .planning/
+
+# hatch-vcs generated version file
+src/llm_consistency/_version.py
+
+# uv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Coverage
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
