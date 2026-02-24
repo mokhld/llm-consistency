@@ -13,6 +13,21 @@ from llm_consistency.metrics import (
     normalized_dtw,
     trapezoidal_auc,
 )
+from llm_consistency.perturbations import (
+    BasePerturbation,
+    FormatChangePerturbation,
+    OptionReorderPerturbation,
+    SeparatorChangePerturbation,
+)
+from llm_consistency.perturbations import (
+    get as get_perturbation,
+)
+from llm_consistency.perturbations import (
+    list_registered as list_registered_perturbations,
+)
+from llm_consistency.perturbations import (
+    register as register_perturbation,
+)
 from llm_consistency.types import (
     KNOWN_SCORERS,
     EvaluationConfig,
@@ -29,17 +44,21 @@ from llm_consistency.types import (
 
 __all__ = [
     "KNOWN_SCORERS",
+    "BasePerturbation",
     "EvaluationConfig",
     "EvaluationReport",
+    "FormatChangePerturbation",
     "LLMConsistencyError",
     "LLMResponse",
     "MCOption",
     "MCQuestion",
     "OpenEndedQuestion",
+    "OptionReorderPerturbation",
     "PerturbationType",
     "PerturbedVariant",
     "QuestionConsistencyResult",
     "ScoredResponse",
+    "SeparatorChangePerturbation",
     "ValidationError",
     "__version__",
     "__version_tuple__",
@@ -49,7 +68,10 @@ __all__ = [
     "car_curve",
     "core_index",
     "dtw_distance",
+    "get_perturbation",
+    "list_registered_perturbations",
     "mca",
     "normalized_dtw",
+    "register_perturbation",
     "trapezoidal_auc",
 ]
