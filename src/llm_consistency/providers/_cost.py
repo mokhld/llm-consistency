@@ -18,6 +18,10 @@ MODEL_PRICING: dict[str, CostPerToken] = {
         input_per_token=0.15 / 1_000_000,
         output_per_token=0.60 / 1_000_000,
     ),
+    "gpt-5-mini": CostPerToken(
+        input_per_token=0.25 / 1_000_000,
+        output_per_token=2.00 / 1_000_000,
+    ),
     "gpt-4.1": CostPerToken(
         input_per_token=2.00 / 1_000_000,
         output_per_token=8.00 / 1_000_000,
@@ -68,7 +72,7 @@ def estimate_cost(
     for unknown models (no error).
 
     Args:
-        model: LLM model identifier (e.g., ``"gpt-4o"``).
+        model: LLM model identifier (e.g., ``"gpt-5-mini"``).
         num_prompts: Number of prompts to estimate for.
         avg_prompt_tokens: Average input tokens per prompt.
         avg_completion_tokens: Average output tokens per prompt.

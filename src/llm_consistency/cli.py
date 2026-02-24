@@ -243,9 +243,6 @@ def run(
         export_json(report, Path(output), metadata=runner.last_metadata)
 
 
-# --- perturbations group (CLI-04) ---
-
-
 @cli.group()
 def perturbations() -> None:
     """Manage perturbation types."""
@@ -263,9 +260,6 @@ def perturbations_list() -> None:
     click.echo("Available perturbation types:")
     for name in names:
         click.echo(f"  - {name}")
-
-
-# --- compare subcommand (CLI-03) ---
 
 
 @cli.command()
@@ -366,9 +360,6 @@ def compare(config: str, output: str | None) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         for model_name, report in results_list:
             export_json(report, out_dir / f"{model_name}.json")
-
-
-# --- dataset group (CLI-05) ---
 
 
 @cli.group()

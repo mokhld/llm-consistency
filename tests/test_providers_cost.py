@@ -21,7 +21,7 @@ from llm_consistency.providers._cost import (
 class TestModelPricing:
     def test_contains_at_least_nine_models(self) -> None:
         """MODEL_PRICING has entries for all listed models."""
-        assert len(MODEL_PRICING) >= 9
+        assert len(MODEL_PRICING) >= 10
 
     def test_all_entries_are_cost_per_token(self) -> None:
         """Every value in MODEL_PRICING is a CostPerToken."""
@@ -39,6 +39,7 @@ class TestModelPricing:
         expected = [
             "gpt-4o",
             "gpt-4o-mini",
+            "gpt-5-mini",
             "gpt-4.1",
             "gpt-4.1-mini",
             "gpt-4.1-nano",

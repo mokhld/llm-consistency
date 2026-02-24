@@ -47,7 +47,7 @@ class BaseLLMProvider(ABC):
     ``_send_request()`` and ``provider_name``.
 
     Args:
-        model: LLM model identifier (e.g., ``"gpt-4o"``).
+        model: LLM model identifier (e.g., ``"gpt-5-mini"``).
         requests_per_minute: Rate limit for the token bucket.
         max_retries: Maximum retry attempts on transient failures.
         request_timeout_s: Per-request timeout in seconds.

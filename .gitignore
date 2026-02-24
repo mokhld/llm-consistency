@@ -23,3 +23,9 @@ htmlcov/
 
 # ruff
 .ruff_cache/
+
+# Test artefacts (end-to-end test outputs)
+.test-artefacts/
+
+# Content (marketing, articles, GTM)
+.content/
