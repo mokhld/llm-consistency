@@ -164,8 +164,8 @@ def dtw_distance(s: Sequence[float], t: Sequence[float]) -> float:
         for j in range(1, m + 1):
             d = abs(s[i - 1] - t[j - 1])
             cost[i][j] = d + min(
-                cost[i - 1][j],      # insertion
-                cost[i][j - 1],      # deletion
+                cost[i - 1][j],  # insertion
+                cost[i][j - 1],  # deletion
                 cost[i - 1][j - 1],  # match
             )
 

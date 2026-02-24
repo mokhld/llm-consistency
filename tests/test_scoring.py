@@ -9,7 +9,6 @@ import pytest
 from llm_consistency.scoring import BaseScorer, CustomScorerAdapter, ExactMatchScorer
 from llm_consistency.types import LLMResponse, MCOption, MCQuestion, ScoredResponse
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -145,9 +144,7 @@ class TestExactMatchScorerStrategy1:
             ("The reasoning is complex. Answer: A", True),
         ],
     )
-    def test_answer_colon_format(
-        self, raw_output: str, expected_correct: bool
-    ) -> None:
+    def test_answer_colon_format(self, raw_output: str, expected_correct: bool) -> None:
         """'Answer: X' pattern correctly extracts the label."""
         question = _make_question_4()
         response = _make_response(raw_output)
@@ -396,7 +393,7 @@ class TestCustomScorerAdapterSimpleSignature:
         assert result.scoring_method == "my_scorer"
 
     def test_simple_callable_incorrect_answer(self) -> None:
-        """Simple callable with non-matching answer returns is_correct=False, score=0.0."""
+        """Non-matching answer returns is_correct=False, score=0.0."""
         adapter = CustomScorerAdapter(
             fn=lambda extracted, correct: extracted == correct,
             name="my_scorer",
