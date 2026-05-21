@@ -548,6 +548,28 @@ guideline). Use the dict's `recommended_n` to size new runs; use
 `observed_power` to know whether an existing run was powered enough
 to trust.
 
+### Paired Model Comparison
+
+`compare_mca_paired` runs McNemar's exact binomial test on
+per-question MCA pass/fail outcomes — the right test when two models
+are evaluated on the same dataset:
+
+```python
+from llm_consistency import compare_mca_paired
+
+result = compare_mca_paired(results_a, results_b, threshold=0.8)
+# PairedTestResult(statistic=1.0, p_value=0.21875, n_discordant=6,
+#                  method="mcnemar_exact")
+
+if result.p_value < 0.05:
+    print(f"Models differ at MCA(0.8); discordant n={result.n_discordant}")
+```
+
+Questions present in only one set are silently dropped. A small
+`n_discordant` means the test is underpowered — pair this with
+`validate_sample_size` to know whether your dataset can actually
+distinguish the two models.
+
 ## Perturbation Types
 
 | Type | Description | What It Tests |

@@ -1134,3 +1134,130 @@ class TestValidateSampleSize:
 
         assert hasattr(llm_consistency, "validate_sample_size")
         assert "validate_sample_size" in llm_consistency.__all__
+
+
+class TestCompareMcaPaired:
+    """McNemar's exact test on paired MCA-pass/fail outcomes."""
+
+    @staticmethod
+    def _qcrs(scores: dict[str, float]) -> list[QuestionConsistencyResult]:
+        return [_qcr(qid, score) for qid, score in scores.items()]
+
+    def test_identical_results_p_value_one(self) -> None:
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        rs = self._qcrs({"q1": 1.0, "q2": 0.9, "q3": 0.3, "q4": 0.0})
+        out = compare_mca_paired(rs, rs, threshold=0.8)
+        assert out.n_discordant == 0
+        assert out.statistic == 0.0
+        assert out.p_value == pytest.approx(1.0)
+        assert out.method == "mcnemar_exact"
+
+    def test_a_strictly_better(self) -> None:
+        """A passes all, B fails all -- maximally discordant in one direction."""
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        a = self._qcrs(dict.fromkeys((f"q{i}" for i in range(8)), 1.0))
+        b = self._qcrs(dict.fromkeys((f"q{i}" for i in range(8)), 0.0))
+        out = compare_mca_paired(a, b, threshold=0.8)
+        assert out.n_discordant == 8
+        # b=8 (A passes, B fails), c=0; min=0; p = 2 * 0.5^8 = 2/256
+        assert out.statistic == 0.0
+        assert out.p_value == pytest.approx(2.0 / 256.0)
+
+    def test_b_strictly_better_symmetric(self) -> None:
+        """Symmetry: swapping a and b doesn't change p_value or n_discordant."""
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        a = self._qcrs(dict.fromkeys((f"q{i}" for i in range(8)), 0.0))
+        b = self._qcrs(dict.fromkeys((f"q{i}" for i in range(8)), 1.0))
+        out = compare_mca_paired(a, b, threshold=0.8)
+        assert out.n_discordant == 8
+        assert out.statistic == 0.0
+        assert out.p_value == pytest.approx(2.0 / 256.0)
+
+    def test_known_two_by_two(self) -> None:
+        """Hand-built 2x2: b=5, c=1 -- two-sided exact p via Binomial(6, 0.5)."""
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        # 6 questions where A passes & B fails, 1 where A fails & B passes,
+        # rest concordant (1 both pass, 1 both fail).
+        a_scores = {
+            **{f"ab{i}": 1.0 for i in range(5)},  # A pass, B fail
+            "ba1": 0.0,  # A fail, B pass
+            "both_pass": 1.0,
+            "both_fail": 0.0,
+        }
+        b_scores = {
+            **{f"ab{i}": 0.0 for i in range(5)},
+            "ba1": 1.0,
+            "both_pass": 1.0,
+            "both_fail": 0.0,
+        }
+        out = compare_mca_paired(
+            self._qcrs(a_scores), self._qcrs(b_scores), threshold=0.8
+        )
+        assert out.n_discordant == 6
+        assert out.statistic == 1.0
+        # 2 * (C(6,0) + C(6,1)) * 0.5^6 = 2 * 7 / 64 = 0.21875
+        assert out.p_value == pytest.approx(0.21875)
+
+    def test_drops_unpaired_question_ids(self) -> None:
+        """Questions present in only one set are silently ignored."""
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        a = self._qcrs({"shared": 1.0, "only_a": 0.0})
+        b = self._qcrs({"shared": 1.0, "only_b": 0.0})
+        out = compare_mca_paired(a, b, threshold=0.8)
+        # Only "shared" counted; both pass -> 0 discordant.
+        assert out.n_discordant == 0
+        assert out.p_value == pytest.approx(1.0)
+
+    def test_no_shared_ids_raises(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        a = self._qcrs({"q1": 1.0})
+        b = self._qcrs({"q2": 1.0})
+        with pytest.raises(ValidationError, match="share no question IDs"):
+            compare_mca_paired(a, b, threshold=0.8)
+
+    def test_empty_inputs_raise(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="must both be non-empty"):
+            compare_mca_paired([], self._qcrs({"q1": 1.0}), threshold=0.8)
+        with pytest.raises(ValidationError, match="must both be non-empty"):
+            compare_mca_paired(self._qcrs({"q1": 1.0}), [], threshold=0.8)
+
+    def test_invalid_threshold_raises(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        a = self._qcrs({"q1": 1.0})
+        b = self._qcrs({"q1": 0.0})
+        with pytest.raises(ValidationError, match=r"threshold must be in"):
+            compare_mca_paired(a, b, threshold=-0.1)
+        with pytest.raises(ValidationError, match=r"threshold must be in"):
+            compare_mca_paired(a, b, threshold=1.1)
+
+    def test_p_value_capped_at_one(self) -> None:
+        """When min(b,c) = floor(n/2), the doubled tail saturates at 1.0."""
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        # 2 discordant pairs in opposite directions -> b=1, c=1
+        a = self._qcrs({"q1": 1.0, "q2": 0.0})
+        b = self._qcrs({"q1": 0.0, "q2": 1.0})
+        out = compare_mca_paired(a, b, threshold=0.8)
+        assert out.n_discordant == 2
+        assert out.statistic == 1.0
+        assert out.p_value == pytest.approx(1.0)
+
+    def test_paired_test_result_exposed_at_top_level(self) -> None:
+        import llm_consistency  # noqa: PLC0415
+
+        assert hasattr(llm_consistency, "PairedTestResult")
+        assert hasattr(llm_consistency, "compare_mca_paired")
+        assert "PairedTestResult" in llm_consistency.__all__
+        assert "compare_mca_paired" in llm_consistency.__all__

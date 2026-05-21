@@ -18,7 +18,11 @@ from llm_consistency._exceptions import ValidationError
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-from llm_consistency.types import MetricResult, QuestionConsistencyResult
+from llm_consistency.types import (
+    MetricResult,
+    PairedTestResult,
+    QuestionConsistencyResult,
+)
 
 _SAMPLE_SIZE_WARNING_THRESHOLD = 200
 
@@ -679,3 +683,88 @@ def validate_sample_size(
         "observed_power": float(observed_power),
         "recommended_n": float(recommended_n),
     }
+
+
+def _mcnemar_exact_p(b: int, c: int) -> float:
+    """Two-sided p-value for McNemar's exact binomial test.
+
+    Under the null ``b ~ Binomial(b + c, 0.5)``; the two-sided p-value
+    is twice the lower-tail probability of the smaller discordant
+    count, capped at 1.0.
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    # Lower-tail probability: sum_{i=0..k} C(n, i) * 0.5**n
+    half_n = 0.5**n
+    cumulative = sum(math.comb(n, i) for i in range(k + 1)) * half_n
+    return min(1.0, 2.0 * cumulative)
+
+
+def compare_mca_paired(
+    results_a: Sequence[QuestionConsistencyResult],
+    results_b: Sequence[QuestionConsistencyResult],
+    threshold: float,
+) -> PairedTestResult:
+    """McNemar's exact binomial test on per-question MCA outcomes.
+
+    For each question that appears in *both* result sets, mark it as
+    "passing" if ``rc_correct >= threshold``.  The test compares the two
+    discordant cells of the resulting 2x2 contingency table:
+
+    - ``b`` = questions where A passes and B fails,
+    - ``c`` = questions where A fails and B passes.
+
+    Under the null hypothesis that the two models have equal MCA at the
+    given threshold, ``b`` is distributed ``Binomial(b + c, 0.5)``.  The
+    returned ``p_value`` is two-sided (lower-tail of ``min(b, c)``,
+    doubled, capped at 1.0).
+
+    Args:
+        results_a: Per-question results for model A.
+        results_b: Per-question results for model B.  Must include the
+            same questions as ``results_a``; questions present in only
+            one set are silently dropped.
+        threshold: MCA threshold; a question passes when
+            ``rc_correct >= threshold``.
+
+    Returns:
+        A :class:`PairedTestResult` with ``statistic = min(b, c)``,
+        the two-sided exact p-value, ``n_discordant = b + c``, and
+        ``method = "mcnemar_exact"``.
+
+    Raises:
+        ValidationError: If either input is empty, if ``threshold`` is
+            not in ``[0.0, 1.0]``, or if the two sets share no
+            question IDs.
+    """
+    if not 0.0 <= threshold <= 1.0:
+        msg = f"threshold must be in [0.0, 1.0], got {threshold}"
+        raise ValidationError(msg)
+    if not results_a or not results_b:
+        msg = "results_a and results_b must both be non-empty"
+        raise ValidationError(msg)
+
+    pass_a: dict[str, bool] = {
+        r.question_id: r.rc_correct >= threshold for r in results_a
+    }
+    pass_b: dict[str, bool] = {
+        r.question_id: r.rc_correct >= threshold for r in results_b
+    }
+    common = sorted(set(pass_a) & set(pass_b))
+    if not common:
+        msg = (
+            "results_a and results_b share no question IDs; McNemar's test is undefined"
+        )
+        raise ValidationError(msg)
+
+    b = sum(1 for qid in common if pass_a[qid] and not pass_b[qid])
+    c = sum(1 for qid in common if not pass_a[qid] and pass_b[qid])
+
+    return PairedTestResult(
+        statistic=float(min(b, c)),
+        p_value=_mcnemar_exact_p(b, c),
+        n_discordant=b + c,
+        method="mcnemar_exact",
+    )

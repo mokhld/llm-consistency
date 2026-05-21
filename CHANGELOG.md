@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Paired-model significance test — `compare_mca_paired(results_a,
+  results_b, threshold)` runs McNemar's exact binomial test on
+  per-question MCA pass/fail outcomes. Returns a new
+  `PairedTestResult(statistic, p_value, n_discordant, method)`
+  dataclass. Questions present in only one set are silently dropped;
+  empty inputs or no shared IDs raise `ValidationError`. Use this
+  to A/B two models on the same dataset and decide whether the MCA
+  gap is statistically significant.
 - Sample-size power analysis utility —
   `validate_sample_size(n, effect_size, alpha=0.05, power=0.80)`
   returns a dict with `observed_power` (achieved at `n`) and

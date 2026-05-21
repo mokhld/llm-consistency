@@ -434,6 +434,58 @@ class MetricResult:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PairedTestResult:
+    """Result of a paired statistical test on two models' per-question outcomes.
+
+    Returned by :func:`llm_consistency.metrics.compare_mca_paired` for
+    McNemar's exact binomial test on paired binary outcomes.
+
+    Attributes:
+        statistic: Test statistic — for McNemar's exact test, the smaller
+            of the two discordant counts (i.e. ``min(b, c)`` where ``b``
+            is "A passes, B fails" and ``c`` is "A fails, B passes").
+        p_value: Two-sided p-value, in ``[0.0, 1.0]``.
+        n_discordant: Total number of discordant pairs (``b + c``).
+            A small ``n_discordant`` means the test has little power
+            regardless of ``p_value``.
+        method: Identifier for the test used (e.g. ``"mcnemar_exact"``).
+    """
+
+    statistic: float
+    p_value: float
+    n_discordant: int
+    method: str
+
+    def __post_init__(self) -> None:
+        """Validate construction-time invariants."""
+        if not 0.0 <= self.p_value <= 1.0:
+            msg = "PairedTestResult.p_value must be in [0.0, 1.0]"
+            raise ValidationError(msg)
+        if self.n_discordant < 0:
+            msg = "PairedTestResult.n_discordant must be non-negative"
+            raise ValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary."""
+        return {
+            "statistic": self.statistic,
+            "p_value": self.p_value,
+            "n_discordant": self.n_discordant,
+            "method": self.method,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PairedTestResult:
+        """Deserialize from a dictionary."""
+        return cls(
+            statistic=float(data["statistic"]),
+            p_value=float(data["p_value"]),
+            n_discordant=int(data["n_discordant"]),
+            method=str(data["method"]),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class QuestionConsistencyResult:
     """Two-axis consistency result for a single question.
 
