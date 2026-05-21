@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Sample-size power analysis utility —
+  `validate_sample_size(n, effect_size, alpha=0.05, power=0.80)`
+  returns a dict with `observed_power` (achieved at `n`) and
+  `recommended_n` (minimum `n` for `target_power`). One-sample
+  two-sided z-test on a proportion with Cohen's h. Emits a
+  `UserWarning` when `n < 200` — the typical perturbation-study
+  guideline. Exported from the top-level package.
 - HuggingFace Hub dataset loader — `MCDataset.load_from_hub(repo_id, *,
   split="train", name=None, token=None, question_col="question",
   choices_col="choices", answer_col="answer", id_col=None, **kwargs)`

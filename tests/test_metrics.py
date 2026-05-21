@@ -1024,3 +1024,113 @@ class TestMetricsWithCI:
         assert core_index_with_ci(
             results, n_bootstrap=50, seed=1
         ).value == pytest.approx(core_index(results))
+
+
+class TestValidateSampleSize:
+    """Power analysis utility for perturbation-study sample sizes."""
+
+    def test_returns_expected_keys(self) -> None:
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        out = validate_sample_size(n=500, effect_size=0.5)
+        assert set(out.keys()) == {
+            "n",
+            "effect_size",
+            "alpha",
+            "target_power",
+            "observed_power",
+            "recommended_n",
+        }
+        assert all(isinstance(v, float) for v in out.values())
+
+    def test_recommended_n_matches_cohen_h(self) -> None:
+        """Cohen's h=0.5, alpha=0.05 (two-sided), power=0.80 -> n=32."""
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        out = validate_sample_size(n=200, effect_size=0.5, alpha=0.05, power=0.80)
+        assert out["recommended_n"] == pytest.approx(32.0)
+
+    def test_observed_power_monotone_in_n(self) -> None:
+        import warnings as _w  # noqa: PLC0415
+
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            low = validate_sample_size(n=50, effect_size=0.2)["observed_power"]
+            mid = validate_sample_size(n=200, effect_size=0.2)["observed_power"]
+        high = validate_sample_size(n=2000, effect_size=0.2)["observed_power"]
+        assert low < mid < high
+
+    def test_recommended_n_decreases_with_larger_effect(self) -> None:
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        small = validate_sample_size(n=500, effect_size=0.2)["recommended_n"]
+        medium = validate_sample_size(n=500, effect_size=0.5)["recommended_n"]
+        large = validate_sample_size(n=500, effect_size=0.8)["recommended_n"]
+        assert small > medium > large
+
+    def test_warns_when_n_below_200(self) -> None:
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with pytest.warns(UserWarning, match="below the typical guidance"):
+            validate_sample_size(n=100, effect_size=0.5)
+
+    def test_no_warning_at_or_above_200(self) -> None:
+        import warnings as _w  # noqa: PLC0415
+
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with _w.catch_warnings():
+            _w.simplefilter("error")  # any warning would raise here
+            validate_sample_size(n=200, effect_size=0.5)
+            validate_sample_size(n=1000, effect_size=0.5)
+
+    def test_echoes_inputs(self) -> None:
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        out = validate_sample_size(n=500, effect_size=0.42, alpha=0.01, power=0.95)
+        assert out["n"] == 500.0
+        assert out["effect_size"] == pytest.approx(0.42)
+        assert out["alpha"] == pytest.approx(0.01)
+        assert out["target_power"] == pytest.approx(0.95)
+
+    def test_invalid_n_raises(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="n must be >= 1"):
+            validate_sample_size(n=0, effect_size=0.5)
+
+    def test_invalid_effect_size_raises(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="effect_size must be > 0"):
+            validate_sample_size(n=500, effect_size=0.0)
+        with pytest.raises(ValidationError, match="effect_size must be > 0"):
+            validate_sample_size(n=500, effect_size=-0.3)
+
+    def test_invalid_alpha_raises(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match=r"alpha must be in \(0, 1\)"):
+            validate_sample_size(n=500, effect_size=0.5, alpha=0.0)
+        with pytest.raises(ValidationError, match=r"alpha must be in \(0, 1\)"):
+            validate_sample_size(n=500, effect_size=0.5, alpha=1.0)
+
+    def test_invalid_power_raises(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match=r"power must be in \(0, 1\)"):
+            validate_sample_size(n=500, effect_size=0.5, power=0.0)
+        with pytest.raises(ValidationError, match=r"power must be in \(0, 1\)"):
+            validate_sample_size(n=500, effect_size=0.5, power=1.0)
+
+    def test_exposed_at_top_level(self) -> None:
+        import llm_consistency  # noqa: PLC0415
+
+        assert hasattr(llm_consistency, "validate_sample_size")
+        assert "validate_sample_size" in llm_consistency.__all__

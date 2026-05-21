@@ -9,13 +9,18 @@ from __future__ import annotations
 import math
 import random
 import statistics
+import warnings
 from collections import Counter
 from typing import TYPE_CHECKING, Literal
+
+from llm_consistency._exceptions import ValidationError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 from llm_consistency.types import MetricResult, QuestionConsistencyResult
+
+_SAMPLE_SIZE_WARNING_THRESHOLD = 200
 
 
 def build_question_consistency_result(
@@ -591,3 +596,86 @@ def car_curve_with_ci(
         )
         for c in sorted(thresholds)
     ]
+
+
+def validate_sample_size(
+    n: int,
+    effect_size: float,
+    alpha: float = 0.05,
+    power: float = 0.80,
+) -> dict[str, float]:
+    """Power analysis for a single-proportion perturbation study.
+
+    Uses the standard one-sample two-sided z-test on a proportion with
+    Cohen's h as the effect size — appropriate for binary-outcome
+    studies like MCA-based perturbation evaluation, where each question
+    contributes a Bernoulli trial.
+
+    The returned dict makes two computations explicit:
+
+    - ``observed_power``: the power achieved at the supplied ``n``.
+    - ``recommended_n``: the minimum ``n`` needed to reach
+      ``target_power`` at the supplied ``effect_size`` and ``alpha``.
+
+    Cohen's conventional anchors for ``effect_size``:
+
+    - ``0.2`` — small
+    - ``0.5`` — medium
+    - ``0.8`` — large
+
+    Args:
+        n: Actual sample size (number of questions in the study).
+        effect_size: Effect size as Cohen's h.  Must be > 0.
+        alpha: Two-sided significance level.  Defaults to ``0.05``.
+        power: Target power for ``recommended_n``.  Defaults to ``0.80``.
+
+    Returns:
+        Dict with keys ``n``, ``effect_size``, ``alpha``, ``target_power``,
+        ``observed_power``, and ``recommended_n``.  All values are
+        ``float``.
+
+    Raises:
+        ValidationError: If ``n < 1``, ``effect_size <= 0``, ``alpha``
+            not in ``(0, 1)``, or ``power`` not in ``(0, 1)``.
+
+    Warnings:
+        Emits ``UserWarning`` when ``n < 200`` — the typical guideline
+        for perturbation studies (Cavalin et al., 2025).
+    """
+    if n < 1:
+        msg = f"n must be >= 1, got {n}"
+        raise ValidationError(msg)
+    if effect_size <= 0:
+        msg = f"effect_size must be > 0, got {effect_size}"
+        raise ValidationError(msg)
+    if not 0.0 < alpha < 1.0:
+        msg = f"alpha must be in (0, 1), got {alpha}"
+        raise ValidationError(msg)
+    if not 0.0 < power < 1.0:
+        msg = f"power must be in (0, 1), got {power}"
+        raise ValidationError(msg)
+
+    if n < _SAMPLE_SIZE_WARNING_THRESHOLD:
+        warnings.warn(
+            f"n={n} is below the typical guidance of n >= "
+            f"{_SAMPLE_SIZE_WARNING_THRESHOLD} for perturbation studies; "
+            f"results may be underpowered",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    norm = statistics.NormalDist()
+    z_alpha = norm.inv_cdf(1.0 - alpha / 2.0)
+    z_beta = norm.inv_cdf(power)
+
+    recommended_n = math.ceil(((z_alpha + z_beta) / effect_size) ** 2)
+    observed_power = norm.cdf(effect_size * math.sqrt(n) - z_alpha)
+
+    return {
+        "n": float(n),
+        "effect_size": float(effect_size),
+        "alpha": float(alpha),
+        "target_power": float(power),
+        "observed_power": float(observed_power),
+        "recommended_n": float(recommended_n),
+    }

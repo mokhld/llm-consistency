@@ -23,6 +23,7 @@ from llm_consistency.metrics import (
     mca_with_ci,
     normalized_dtw,
     trapezoidal_auc,
+    validate_sample_size,
 )
 from llm_consistency.perturbations import (
     BasePerturbation,
@@ -142,4 +143,5 @@ __all__ = [
     "register_perturbation",
     "render_car_ascii",
     "trapezoidal_auc",
+    "validate_sample_size",
 ]

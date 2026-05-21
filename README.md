@@ -523,6 +523,31 @@ The JSON report (`-o report.json`) embeds these CIs by default — see `aggregat
 
 The lower-level bootstrap primitives are exposed too: `bootstrap_ci(...)` (percentile) and `bootstrap_ci_bca(...)` (BCa), both accepting an arbitrary `statistic` callable.
 
+### Sample-Size Power Analysis
+
+Sanity-check whether your dataset is large enough to detect the
+effect size you care about:
+
+```python
+from llm_consistency import validate_sample_size
+
+result = validate_sample_size(
+    n=len(dataset),
+    effect_size=0.5,   # Cohen's h: 0.2 small, 0.5 medium, 0.8 large
+    alpha=0.05,
+    power=0.80,
+)
+# {
+#   "n": 150.0, "effect_size": 0.5, "alpha": 0.05, "target_power": 0.80,
+#   "observed_power": 0.99, "recommended_n": 32.0,
+# }
+```
+
+Emits `UserWarning` when `n < 200` (the typical perturbation-study
+guideline). Use the dict's `recommended_n` to size new runs; use
+`observed_power` to know whether an existing run was powered enough
+to trust.
+
 ## Perturbation Types
 
 | Type | Description | What It Tests |
