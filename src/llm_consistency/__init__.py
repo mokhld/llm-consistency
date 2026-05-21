@@ -23,6 +23,7 @@ from llm_consistency.metrics import (
     mca,
     mca_with_ci,
     normalized_dtw,
+    perturbation_impact,
     trapezoidal_auc,
     validate_sample_size,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "mca",
     "mca_with_ci",
     "normalized_dtw",
+    "perturbation_impact",
     "register_perturbation",
     "render_car_ascii",
     "trapezoidal_auc",

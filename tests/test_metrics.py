@@ -1261,3 +1261,159 @@ class TestCompareMcaPaired:
         assert hasattr(llm_consistency, "compare_mca_paired")
         assert "PairedTestResult" in llm_consistency.__all__
         assert "compare_mca_paired" in llm_consistency.__all__
+
+
+class TestPerturbationImpact:
+    """Variance decomposition of correctness across perturbation types."""
+
+    @staticmethod
+    def _qcr_with_responses(
+        question_id: str, responses: list[tuple[str, bool]]
+    ) -> QuestionConsistencyResult:
+        """Build a QCR carrying (perturbation_type, is_correct) scored responses."""
+        from llm_consistency.types import ScoredResponse  # noqa: PLC0415
+
+        scored = tuple(
+            ScoredResponse(
+                question_id=f"{question_id}_v{i}",
+                is_correct=ok,
+                score=1.0 if ok else 0.0,
+                scoring_method="exact_match",
+                perturbation_type=pt,
+            )
+            for i, (pt, ok) in enumerate(responses)
+        )
+        return QuestionConsistencyResult(
+            question_id=question_id,
+            rc_correct=sum(1 for _, ok in responses if ok) / len(responses),
+            rc_agree=1.0,
+            total_variants=len(responses),
+            correct_count=sum(1 for _, ok in responses if ok),
+            scored_responses=scored,
+        )
+
+    @staticmethod
+    def _report(qcrs: list[QuestionConsistencyResult]):  # type: ignore[no-untyped-def]
+        from llm_consistency.types import (  # noqa: PLC0415
+            EvaluationConfig,
+            EvaluationReport,
+            PerturbationType,
+        )
+
+        config = EvaluationConfig(
+            model="mock",
+            provider="mock",
+            scorer="exact_match",
+            perturbation_types=(PerturbationType.OPTION_REORDER,),
+            num_variants=1,
+        )
+        return EvaluationReport(
+            config=config,
+            results=tuple(qcrs),
+            total_questions=len(qcrs),
+            total_variants=sum(q.total_variants for q in qcrs),
+            mean_rc_correct=0.0,
+            mean_rc_agree=0.0,
+        )
+
+    def test_groups_by_perturbation_type(self) -> None:
+        from llm_consistency.metrics import perturbation_impact  # noqa: PLC0415
+        from llm_consistency.types import PerturbationType  # noqa: PLC0415
+
+        qcr = self._qcr_with_responses(
+            "q1",
+            [
+                ("option_reorder", True),
+                ("option_reorder", False),  # 50% failure for option_reorder
+                ("format_change", False),
+                ("format_change", False),  # 100% failure for format_change
+                ("separator_change", True),
+                ("separator_change", True),  # 0% failure for separator_change
+            ],
+        )
+        report = self._report([qcr])
+
+        impact = perturbation_impact(report)
+        assert set(impact.keys()) == {
+            PerturbationType.OPTION_REORDER,
+            PerturbationType.FORMAT_CHANGE,
+            PerturbationType.SEPARATOR_CHANGE,
+        }
+        assert impact[PerturbationType.OPTION_REORDER] == pytest.approx(0.5)
+        assert impact[PerturbationType.FORMAT_CHANGE] == pytest.approx(1.0)
+        assert impact[PerturbationType.SEPARATOR_CHANGE] == pytest.approx(0.0)
+
+    def test_aggregates_across_questions(self) -> None:
+        from llm_consistency.metrics import perturbation_impact  # noqa: PLC0415
+        from llm_consistency.types import PerturbationType  # noqa: PLC0415
+
+        qcr1 = self._qcr_with_responses(
+            "q1",
+            [("option_reorder", True), ("option_reorder", False)],
+        )
+        qcr2 = self._qcr_with_responses(
+            "q2",
+            [("option_reorder", False), ("option_reorder", False)],
+        )
+        report = self._report([qcr1, qcr2])
+        impact = perturbation_impact(report)
+        # 1 correct out of 4 -> 0.75 failure rate
+        assert impact[PerturbationType.OPTION_REORDER] == pytest.approx(0.75)
+
+    def test_skips_legacy_responses_without_perturbation_type(self) -> None:
+        from llm_consistency.metrics import perturbation_impact  # noqa: PLC0415
+        from llm_consistency.types import (  # noqa: PLC0415
+            PerturbationType,
+            ScoredResponse,
+        )
+
+        qcr = QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=0.5,
+            rc_agree=1.0,
+            total_variants=2,
+            correct_count=1,
+            scored_responses=(
+                ScoredResponse(
+                    question_id="q1_v0",
+                    is_correct=True,
+                    score=1.0,
+                    scoring_method="exact_match",
+                    # no perturbation_type -- legacy
+                ),
+                ScoredResponse(
+                    question_id="q1_v1",
+                    is_correct=False,
+                    score=0.0,
+                    scoring_method="exact_match",
+                    perturbation_type="option_reorder",
+                ),
+            ),
+        )
+        report = self._report([qcr])
+        impact = perturbation_impact(report)
+        # Only the annotated response is counted; legacy one is skipped.
+        assert impact == {PerturbationType.OPTION_REORDER: pytest.approx(1.0)}
+
+    def test_unknown_perturbation_string_is_skipped(self) -> None:
+        from llm_consistency.metrics import perturbation_impact  # noqa: PLC0415
+
+        qcr = self._qcr_with_responses(
+            "q1", [("not_a_real_perturbation", False), ("option_reorder", True)]
+        )
+        report = self._report([qcr])
+        impact = perturbation_impact(report)
+        # The unknown type is silently dropped; only option_reorder remains.
+        assert len(impact) == 1
+
+    def test_empty_report(self) -> None:
+        from llm_consistency.metrics import perturbation_impact  # noqa: PLC0415
+
+        report = self._report([])
+        assert perturbation_impact(report) == {}
+
+    def test_exposed_at_top_level(self) -> None:
+        import llm_consistency  # noqa: PLC0415
+
+        assert hasattr(llm_consistency, "perturbation_impact")
+        assert "perturbation_impact" in llm_consistency.__all__

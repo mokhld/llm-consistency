@@ -16,6 +16,7 @@ from llm_consistency.types import (
     MCOption,
     MCQuestion,
     OpenEndedQuestion,
+    PairedTestResult,
     PerturbationType,
     PerturbedVariant,
     QuestionConsistencyResult,
@@ -553,6 +554,35 @@ class TestScoredResponse:
         )
         restored = ScoredResponse.from_dict(json.loads(json.dumps(sr.to_dict())))
         assert sr == restored
+
+    def test_scored_response_perturbation_type_default_none(self) -> None:
+        sr = ScoredResponse(
+            question_id="q1", is_correct=True, score=1.0, scoring_method="exact_match"
+        )
+        assert sr.perturbation_type is None
+
+    def test_scored_response_with_perturbation_type_round_trip(self) -> None:
+        sr = ScoredResponse(
+            question_id="q1_v0",
+            is_correct=True,
+            score=1.0,
+            scoring_method="exact_match",
+            perturbation_type="option_reorder",
+        )
+        restored = ScoredResponse.from_dict(json.loads(json.dumps(sr.to_dict())))
+        assert restored.perturbation_type == "option_reorder"
+        assert restored == sr
+
+    def test_scored_response_legacy_dict_round_trip(self) -> None:
+        """from_dict tolerates dicts missing the new perturbation_type key."""
+        legacy = {
+            "question_id": "q1",
+            "is_correct": True,
+            "score": 1.0,
+            "scoring_method": "exact_match",
+        }
+        restored = ScoredResponse.from_dict(legacy)
+        assert restored.perturbation_type is None
 
 
 # --- QuestionConsistencyResult tests ---
@@ -1120,3 +1150,41 @@ class TestPublicAPI:
         """Exceptions importable from llm_consistency._exceptions."""
         assert LLMConsistencyError is not None
         assert ValidationError is not None
+
+
+class TestPairedTestResult:
+    """PairedTestResult validates inputs and round-trips through to_dict/from_dict."""
+
+    def test_construction(self) -> None:
+        r = PairedTestResult(
+            statistic=2.0, p_value=0.05, n_discordant=5, method="mcnemar_exact"
+        )
+        assert r.statistic == 2.0
+        assert r.p_value == 0.05
+        assert r.n_discordant == 5
+        assert r.method == "mcnemar_exact"
+
+    def test_invalid_p_value_low(self) -> None:
+        with pytest.raises(ValidationError, match="p_value must be in"):
+            PairedTestResult(
+                statistic=0.0, p_value=-0.01, n_discordant=0, method="mcnemar_exact"
+            )
+
+    def test_invalid_p_value_high(self) -> None:
+        with pytest.raises(ValidationError, match="p_value must be in"):
+            PairedTestResult(
+                statistic=0.0, p_value=1.01, n_discordant=0, method="mcnemar_exact"
+            )
+
+    def test_negative_n_discordant_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="n_discordant must be"):
+            PairedTestResult(
+                statistic=0.0, p_value=0.5, n_discordant=-1, method="mcnemar_exact"
+            )
+
+    def test_round_trip(self) -> None:
+        r = PairedTestResult(
+            statistic=1.5, p_value=0.25, n_discordant=8, method="mcnemar_exact"
+        )
+        restored = PairedTestResult.from_dict(json.loads(json.dumps(r.to_dict())))
+        assert restored == r

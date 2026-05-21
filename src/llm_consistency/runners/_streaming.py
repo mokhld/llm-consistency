@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from llm_consistency.runners._pipeline import (
@@ -159,7 +160,10 @@ class StreamingRunner:
         scored_responses: list[ScoredResponse] = []
         variant_data: list[tuple[str, bool]] = []
 
-        for variant_qid, raw_output, error in query_results:
+        for variant, (variant_qid, raw_output, error) in zip(
+            variants, query_results, strict=True
+        ):
+            pt_value = variant.perturbation_type.value
             if error is not None:
                 scored_responses.append(
                     ScoredResponse(
@@ -167,6 +171,7 @@ class StreamingRunner:
                         is_correct=False,
                         score=0.0,
                         scoring_method=f"error:{error}",
+                        perturbation_type=pt_value,
                     )
                 )
                 variant_data.append((f"<error:{variant_qid}>", False))
@@ -180,6 +185,7 @@ class StreamingRunner:
                 provider=config.provider,
             )
             sr = scorer.score(response, question)
+            sr = replace(sr, perturbation_type=pt_value)
             scored_responses.append(sr)
 
             extracted = _extract_mc_answer(raw_output, valid_labels)

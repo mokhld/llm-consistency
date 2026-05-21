@@ -548,6 +548,25 @@ guideline). Use the dict's `recommended_n` to size new runs; use
 `observed_power` to know whether an existing run was powered enough
 to trust.
 
+### Which Perturbation Drives the Consistency Drop?
+
+`perturbation_impact` decomposes the failure rate by perturbation
+type, so you know which axis to focus mitigation on:
+
+```python
+from llm_consistency import perturbation_impact
+
+impact = perturbation_impact(report)
+# {PerturbationType.OPTION_REORDER: 0.12,
+#  PerturbationType.FORMAT_CHANGE: 0.41,
+#  PerturbationType.SEPARATOR_CHANGE: 0.05}
+```
+
+Values are the mean failure rate (`1 - mean is_correct`) across all
+variants of each type. The runner pipeline annotates each
+`ScoredResponse` with its source `perturbation_type`; legacy
+responses without the annotation are silently skipped.
+
 ### Paired Model Comparison
 
 `compare_mca_paired` runs McNemar's exact binomial test on

@@ -336,12 +336,17 @@ class ScoredResponse:
         is_correct: Whether the response was judged correct.
         score: Numeric score (0.0 to 1.0 typical range).
         scoring_method: Name of the scorer that produced this result.
+        perturbation_type: The perturbation type that produced the
+            variant this response came from (``PerturbationType.value``
+            string, e.g. ``"option_reorder"``).  ``None`` for responses
+            constructed outside the runner pipeline.
     """
 
     question_id: str
     is_correct: bool
     score: float
     scoring_method: str
+    perturbation_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dictionary."""
@@ -350,6 +355,7 @@ class ScoredResponse:
             "is_correct": self.is_correct,
             "score": self.score,
             "scoring_method": self.scoring_method,
+            "perturbation_type": self.perturbation_type,
         }
 
     @classmethod
@@ -362,11 +368,13 @@ class ScoredResponse:
         Returns:
             A new ScoredResponse instance.
         """
+        pt = data.get("perturbation_type")
         return cls(
             question_id=str(data["question_id"]),
             is_correct=bool(data["is_correct"]),
             score=float(data["score"]),
             scoring_method=str(data["scoring_method"]),
+            perturbation_type=str(pt) if pt is not None else None,
         )
 
 

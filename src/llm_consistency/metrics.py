@@ -19,8 +19,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 from llm_consistency.types import (
+    EvaluationReport,
     MetricResult,
     PairedTestResult,
+    PerturbationType,
     QuestionConsistencyResult,
 )
 
@@ -768,3 +770,48 @@ def compare_mca_paired(
         n_discordant=b + c,
         method="mcnemar_exact",
     )
+
+
+def perturbation_impact(
+    report: EvaluationReport,
+) -> dict[PerturbationType, float]:
+    """Failure rate per perturbation type — variance decomposition.
+
+    Walks every ``ScoredResponse`` in ``report.results`` and groups by
+    ``perturbation_type`` (set by the runner pipeline on each scored
+    response).  Returns the mean failure rate (``1 - mean is_correct``)
+    per type — the higher the value, the more that perturbation drives
+    the overall consistency drop.
+
+    Responses with ``perturbation_type=None`` (legacy reports, or
+    responses constructed outside the runner pipeline) are skipped;
+    perturbation type strings that don't match a known
+    :class:`PerturbationType` enum value are also skipped (with no
+    error, so future enum additions don't break old reports).
+
+    Args:
+        report: A completed :class:`EvaluationReport`.
+
+    Returns:
+        Mapping of :class:`PerturbationType` to mean failure rate in
+        ``[0.0, 1.0]``.  Returns an empty dict if the report has no
+        annotated scored responses.
+    """
+    # Map from PerturbationType.value -> (correct_count, total_count)
+    counts: dict[str, list[int]] = {}
+    for qcr in report.results:
+        for sr in qcr.scored_responses:
+            if sr.perturbation_type is None:
+                continue
+            slot = counts.setdefault(sr.perturbation_type, [0, 0])
+            slot[0] += int(sr.is_correct)
+            slot[1] += 1
+
+    impact: dict[PerturbationType, float] = {}
+    for pt_value, (correct, total) in counts.items():
+        try:
+            pt = PerturbationType(pt_value)
+        except ValueError:
+            continue
+        impact[pt] = 1.0 - (correct / total) if total > 0 else 0.0
+    return impact

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -240,7 +241,10 @@ class BatchRunner:
         scored_responses: list[ScoredResponse] = []
         variant_data: list[tuple[str, bool]] = []
 
-        for variant_qid, raw_output, error in query_results:
+        for variant, (variant_qid, raw_output, error) in zip(
+            variants, query_results, strict=True
+        ):
+            pt_value = variant.perturbation_type.value
             if error is not None:
                 scored_responses.append(
                     ScoredResponse(
@@ -248,6 +252,7 @@ class BatchRunner:
                         is_correct=False,
                         score=0.0,
                         scoring_method=f"error:{error}",
+                        perturbation_type=pt_value,
                     )
                 )
                 variant_data.append((f"<error:{variant_qid}>", False))
@@ -263,6 +268,7 @@ class BatchRunner:
             )
 
             sr = scorer.score(response, question)
+            sr = replace(sr, perturbation_type=pt_value)
             scored_responses.append(sr)
 
             # Extract answer label for variant_data (answer distribution)

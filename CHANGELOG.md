@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-perturbation variance decomposition —
+  `perturbation_impact(report)` returns
+  `dict[PerturbationType, float]` mapping each perturbation type to
+  its mean failure rate across the run. Identifies which
+  perturbation drives the largest consistency drop. To support it,
+  `ScoredResponse` grows a new optional `perturbation_type: str | None`
+  field (defaulting to `None` for backward compatibility) that the
+  `BatchRunner` and `StreamingRunner` now populate per variant.
+  `from_dict` tolerates legacy payloads missing the field.
 - Paired-model significance test — `compare_mca_paired(results_a,
   results_b, threshold)` runs McNemar's exact binomial test on
   per-question MCA pass/fail outcomes. Returns a new
