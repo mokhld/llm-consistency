@@ -415,7 +415,27 @@ Filters to questions where the model at least *agrees with itself*, then measure
 
 ### Bootstrap Confidence Intervals
 
-Add `--bootstrap N` (planned for v1.1) to compute confidence intervals on all metrics via resampling.
+Every aggregate metric ships with a `*_with_ci` sibling that returns a `MetricResult(value, ci_lower, ci_upper, n_samples, confidence, method)`. The default bootstrap is **BCa** (bias-corrected accelerated); percentile is available via `method="percentile"`.
+
+```python
+from llm_consistency import (
+    mca_with_ci,
+    core_index_with_ci,
+    agreement_gated_accuracy_with_ci,
+    car_curve_with_ci,
+)
+
+# Each call returns a MetricResult with point estimate + 95% BCa CI.
+mca_ci   = mca_with_ci(results, threshold=0.8, n_bootstrap=1000, seed=42)
+core_ci  = core_index_with_ci(results, n_bootstrap=1000, seed=42)
+aga_ci   = agreement_gated_accuracy_with_ci(results, tau_agree=0.8, seed=42)
+curve_ci = car_curve_with_ci(results, n_bootstrap=1000, seed=42)
+# curve_ci is list[(threshold, MetricResult)]
+```
+
+The JSON report (`-o report.json`) embeds these CIs by default — see `aggregate.core_index_ci`, `aggregate.mca_at_threshold_ci`, and `aggregate.car_curve_ci`. The scalar fields (`core_index`, `mca_at_threshold`, `car_curve`) remain unchanged for backward compatibility.
+
+The lower-level bootstrap primitives are exposed too: `bootstrap_ci(...)` (percentile) and `bootstrap_ci_bca(...)` (BCa), both accepting an arbitrary `statistic` callable.
 
 ## Perturbation Types
 
@@ -531,7 +551,18 @@ The `--output` flag produces a structured JSON report:
   "mean_rc_agree": 0.7667,
   "aggregate": {
     "core_index": 0.5544,
-    "car_curve": [[0.0, 1.0], [0.1, 1.0], ...]
+    "mca_at_threshold": 0.6,
+    "car_curve": [[0.0, 1.0], [0.1, 1.0], ...],
+    "core_index_ci": {
+      "value": 0.5544,
+      "ci_lower": 0.4112,
+      "ci_upper": 0.6831,
+      "n_samples": 5,
+      "confidence": 0.95,
+      "method": "bca"
+    },
+    "mca_at_threshold_ci": {"value": 0.6, "ci_lower": 0.2, "ci_upper": 1.0, "n_samples": 5, "confidence": 0.95, "method": "bca"},
+    "car_curve_ci": [[0.0, {"value": 1.0, "ci_lower": 1.0, "ci_upper": 1.0, "n_samples": 5, "confidence": 0.95, "method": "bca"}], ...]
   },
   "metadata": {
     "started_at": "2026-02-22T...",
