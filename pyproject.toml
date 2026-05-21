@@ -31,8 +31,9 @@ anthropic = ["anthropic>=0.30"]
 ollama = ["ollama>=0.3"]
 litellm = ["litellm>=1.40"]
 embeddings = ["sentence-transformers>=3.0"]
+huggingface = ["datasets>=2.14"]
 all = [
-    "llm-consistency[openai,anthropic,ollama,litellm,embeddings]",
+    "llm-consistency[openai,anthropic,ollama,litellm,embeddings,huggingface]",
 ]
 
 [project.scripts]
@@ -108,7 +109,7 @@ module = "tests.*"
 disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
-module = ["openai", "openai.*", "anthropic", "anthropic.*", "ollama", "ollama.*", "litellm", "litellm.*"]
+module = ["openai", "openai.*", "anthropic", "anthropic.*", "ollama", "ollama.*", "litellm", "litellm.*", "datasets", "datasets.*"]
 ignore_missing_imports = true
 
 # --- Linting ---

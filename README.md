@@ -46,7 +46,10 @@ pip install llm-consistency[anthropic]
 pip install llm-consistency[ollama]
 pip install llm-consistency[litellm]
 
-# All providers
+# HuggingFace Hub dataset loader
+pip install llm-consistency[huggingface]
+
+# All providers + HuggingFace loader
 pip install llm-consistency[all]
 ```
 
@@ -294,6 +297,38 @@ q1,What is 2+2?,3,4,5,6,B
 ```
 
 Format is auto-detected from file extension (`.json`, `.jsonl`, `.csv`).
+
+### HuggingFace Hub
+
+Load MC datasets directly from the Hub (requires the `huggingface`
+extra: `pip install llm-consistency[huggingface]`):
+
+```python
+from llm_consistency import MCDataset
+
+# Defaults match the cais/mmlu schema:
+#   question -> stem, choices (list[str]) -> options, answer (int) -> correct.
+dataset = MCDataset.load_from_hub(
+    "cais/mmlu",
+    name="abstract_algebra",
+    split="validation",
+)
+
+# Custom schemas via column-mapping kwargs:
+dataset = MCDataset.load_from_hub(
+    "my-org/mc-eval",
+    question_col="prompt",
+    choices_col="options",
+    answer_col="label",
+    id_col="qid",
+)
+```
+
+The `answer` column accepts an `int` index, a single-letter label
+(`"A"`/`"a"`), or a string matching one of the choice texts exactly.
+Up to 26 options are supported (labels `A`–`Z`). Any extra kwargs are
+forwarded to `datasets.load_dataset` (e.g. `revision="main"`,
+`streaming=False`).
 
 ## Python API
 

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- HuggingFace Hub dataset loader — `MCDataset.load_from_hub(repo_id, *,
+  split="train", name=None, token=None, question_col="question",
+  choices_col="choices", answer_col="answer", id_col=None, **kwargs)`
+  maps `cais/mmlu`-style schemas to `MCQuestion`s out of the box.
+  Custom schemas supported via column-mapping kwargs. Answer column
+  accepts `int` index, single-letter label, or choice-text match.
+  Requires the new optional `huggingface` extra (`pip install
+  llm-consistency[huggingface]`); raises a clear `ImportError`
+  otherwise.
 - `examples/` directory with six runnable end-to-end demonstrations
   (basic mock, dry-run, checkpoint/resume, custom scorer, export
   formats, model comparison) plus a bundled `datasets/sample.jsonl`.
