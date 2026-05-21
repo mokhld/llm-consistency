@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import math
 import random
+import statistics
 from collections import Counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-from llm_consistency.types import QuestionConsistencyResult
+from llm_consistency.types import MetricResult, QuestionConsistencyResult
 
 
 def build_question_consistency_result(
@@ -307,3 +308,286 @@ def bootstrap_ci(
     lower_idx = max(0, min(lower_idx, n_bootstrap - 1))
     upper_idx = max(0, min(upper_idx, n_bootstrap - 1))
     return (estimates[lower_idx], estimates[upper_idx])
+
+
+def bootstrap_ci_bca(
+    results: Sequence[QuestionConsistencyResult],
+    statistic: Callable[[Sequence[QuestionConsistencyResult]], float],
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """Compute a bias-corrected accelerated (BCa) bootstrap CI.
+
+    BCa adjusts the percentile bounds by two corrections:
+
+    - ``z0`` (bias): the inverse normal CDF of the proportion of bootstrap
+      estimates strictly less than the observed estimate.
+    - ``a`` (acceleration): a jackknife-derived skewness correction.
+
+    The adjusted lower/upper percentiles are then:
+
+    ``alpha_low  = Phi(z0 + (z0 + z_{alpha/2})   / (1 - a*(z0 + z_{alpha/2})))``
+    ``alpha_high = Phi(z0 + (z0 + z_{1-alpha/2}) / (1 - a*(z0 + z_{1-alpha/2})))``
+
+    BCa is preferred over the plain percentile method when the bootstrap
+    distribution is biased or skewed, which is common for bounded
+    statistics like MCA, CORE, and AGA.
+
+    Degenerate cases (empty input, zero jackknife variance, or all
+    bootstrap estimates equal) fall back to the percentile bounds.
+
+    Args:
+        results: Per-question consistency results.
+        statistic: A callable that computes a scalar metric from results.
+        n_bootstrap: Number of bootstrap resamples.
+        confidence: Confidence level (e.g. 0.95 for 95% CI).
+        seed: Random seed for reproducibility, or ``None``.
+
+    Returns:
+        ``(lower, upper)`` BCa confidence interval bounds.
+    """
+    result_list = list(results)
+    n = len(result_list)
+    if n == 0:
+        return (0.0, 0.0)
+
+    observed = statistic(result_list)
+
+    # Draw bootstrap estimates.
+    rng = random.Random(seed)
+    estimates: list[float] = [
+        statistic(rng.choices(result_list, k=n)) for _ in range(n_bootstrap)
+    ]
+    estimates.sort()
+
+    norm = statistics.NormalDist()
+    alpha = 1.0 - confidence
+
+    # Bias correction z0.
+    below = sum(1 for e in estimates if e < observed)
+    if below in (0, n_bootstrap):
+        # All bootstrap estimates lie on one side of the observed value:
+        # BCa is ill-defined here. Fall back to percentile.
+        lower_idx = max(0, min(math.floor((alpha / 2) * n_bootstrap), n_bootstrap - 1))
+        upper_idx = max(
+            0, min(math.ceil((1.0 - alpha / 2) * n_bootstrap) - 1, n_bootstrap - 1)
+        )
+        return (estimates[lower_idx], estimates[upper_idx])
+    z0 = norm.inv_cdf(below / n_bootstrap)
+
+    # Acceleration via leave-one-out jackknife.
+    jackknife = [statistic(result_list[:i] + result_list[i + 1 :]) for i in range(n)]
+    jack_mean = sum(jackknife) / n
+    num = sum((jack_mean - j) ** 3 for j in jackknife)
+    den = 6.0 * (sum((jack_mean - j) ** 2 for j in jackknife) ** 1.5)
+    accel = num / den if den > 0 else 0.0
+
+    z_lo = norm.inv_cdf(alpha / 2)
+    z_hi = norm.inv_cdf(1.0 - alpha / 2)
+
+    def _adjust(z: float) -> float:
+        denom = 1.0 - accel * (z0 + z)
+        if denom == 0:
+            return alpha / 2 if z < 0 else 1.0 - alpha / 2
+        return norm.cdf(z0 + (z0 + z) / denom)
+
+    alpha_low = _adjust(z_lo)
+    alpha_high = _adjust(z_hi)
+
+    lower_idx = max(0, min(math.floor(alpha_low * n_bootstrap), n_bootstrap - 1))
+    upper_idx = max(0, min(math.ceil(alpha_high * n_bootstrap) - 1, n_bootstrap - 1))
+    return (estimates[lower_idx], estimates[upper_idx])
+
+
+_BootstrapMethod = Literal["bca", "percentile"]
+
+
+def _bootstrap_for(
+    method: _BootstrapMethod,
+) -> Callable[
+    [
+        Sequence[QuestionConsistencyResult],
+        Callable[[Sequence[QuestionConsistencyResult]], float],
+        int,
+        float,
+        int | None,
+    ],
+    tuple[float, float],
+]:
+    """Dispatch to the bootstrap implementation named by *method*."""
+    if method == "bca":
+        return bootstrap_ci_bca
+    if method == "percentile":
+        return bootstrap_ci
+    msg = f"Unknown bootstrap method {method!r}. Use 'bca' or 'percentile'."
+    raise ValueError(msg)
+
+
+def _wrap_result(
+    value: float,
+    ci: tuple[float, float],
+    n: int,
+    confidence: float,
+    method: str,
+) -> MetricResult:
+    """Build a MetricResult ensuring ci_lower <= value <= ci_upper.
+
+    Bootstrap CIs can occasionally fall slightly above or below the
+    observed value due to sampling noise; we widen the interval to the
+    observed value rather than constructing an invalid MetricResult.
+    """
+    ci_lower = min(ci[0], value)
+    ci_upper = max(ci[1], value)
+    return MetricResult(
+        value=value,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        n_samples=n,
+        confidence=confidence,
+        method=method,
+    )
+
+
+def mca_with_ci(
+    results: Sequence[QuestionConsistencyResult],
+    threshold: float,
+    *,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int | None = None,
+    method: _BootstrapMethod = "bca",
+) -> MetricResult:
+    """Compute MCA at *threshold* with a bootstrap confidence interval.
+
+    See :func:`mca` for the point estimate. The CI is over questions
+    (each question is a bootstrap sample).
+
+    Args:
+        results: Per-question consistency results.
+        threshold: Consistency threshold *c* in [0.0, 1.0].
+        n_bootstrap: Number of bootstrap resamples.
+        confidence: Confidence level (e.g. 0.95 for 95% CI).
+        seed: Random seed for reproducibility.
+        method: ``"bca"`` (default) or ``"percentile"``.
+
+    Returns:
+        A :class:`MetricResult` with point estimate, CI, and metadata.
+    """
+
+    def _stat(sample: Sequence[QuestionConsistencyResult]) -> float:
+        return mca(sample, threshold)
+
+    point = mca(results, threshold)
+    ci = _bootstrap_for(method)(results, _stat, n_bootstrap, confidence, seed)
+    return _wrap_result(point, ci, len(results), confidence, method)
+
+
+def core_index_with_ci(
+    results: Sequence[QuestionConsistencyResult],
+    thresholds: Sequence[float] | None = None,
+    *,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int | None = None,
+    method: _BootstrapMethod = "bca",
+) -> MetricResult:
+    """Compute CORE with a bootstrap confidence interval.
+
+    See :func:`core_index` for the point estimate.
+
+    Args:
+        results: Per-question consistency results.
+        thresholds: CAR curve thresholds.
+        n_bootstrap: Number of bootstrap resamples.
+        confidence: Confidence level.
+        seed: Random seed for reproducibility.
+        method: ``"bca"`` (default) or ``"percentile"``.
+
+    Returns:
+        A :class:`MetricResult` for the CORE index.
+    """
+
+    def _stat(sample: Sequence[QuestionConsistencyResult]) -> float:
+        return core_index(sample, thresholds)
+
+    point = core_index(results, thresholds)
+    ci = _bootstrap_for(method)(results, _stat, n_bootstrap, confidence, seed)
+    return _wrap_result(point, ci, len(results), confidence, method)
+
+
+def agreement_gated_accuracy_with_ci(
+    results: Sequence[QuestionConsistencyResult],
+    tau_agree: float,
+    *,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int | None = None,
+    method: _BootstrapMethod = "bca",
+) -> MetricResult:
+    """Compute AGA with a bootstrap confidence interval.
+
+    See :func:`agreement_gated_accuracy` for the point estimate.
+
+    Args:
+        results: Per-question consistency results.
+        tau_agree: Agreement threshold.
+        n_bootstrap: Number of bootstrap resamples.
+        confidence: Confidence level.
+        seed: Random seed for reproducibility.
+        method: ``"bca"`` (default) or ``"percentile"``.
+
+    Returns:
+        A :class:`MetricResult` for AGA.
+    """
+
+    def _stat(sample: Sequence[QuestionConsistencyResult]) -> float:
+        return agreement_gated_accuracy(sample, tau_agree)
+
+    point = agreement_gated_accuracy(results, tau_agree)
+    ci = _bootstrap_for(method)(results, _stat, n_bootstrap, confidence, seed)
+    return _wrap_result(point, ci, len(results), confidence, method)
+
+
+def car_curve_with_ci(
+    results: Sequence[QuestionConsistencyResult],
+    thresholds: Sequence[float] | None = None,
+    *,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int | None = None,
+    method: _BootstrapMethod = "bca",
+) -> list[tuple[float, MetricResult]]:
+    """Build the CAR curve with a CI per threshold.
+
+    Each (threshold, MetricResult) pair carries the point estimate and
+    bootstrap CI for MCA at that threshold. Thresholds are sorted
+    ascending.
+
+    Args:
+        results: Per-question consistency results.
+        thresholds: CAR curve thresholds.
+        n_bootstrap: Number of bootstrap resamples.
+        confidence: Confidence level.
+        seed: Random seed for reproducibility.
+        method: ``"bca"`` (default) or ``"percentile"``.
+
+    Returns:
+        List of ``(threshold, MetricResult)`` pairs sorted by threshold.
+    """
+    if thresholds is None:
+        thresholds = [i / 10 for i in range(11)]
+    return [
+        (
+            c,
+            mca_with_ci(
+                results,
+                c,
+                n_bootstrap=n_bootstrap,
+                confidence=confidence,
+                seed=seed,
+                method=method,
+            ),
+        )
+        for c in sorted(thresholds)
+    ]

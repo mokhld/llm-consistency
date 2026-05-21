@@ -772,6 +772,255 @@ class TestPublicAPIImports:
             "core_index",
             "agreement_gated_accuracy",
             "bootstrap_ci",
+            "bootstrap_ci_bca",
+            "mca_with_ci",
+            "core_index_with_ci",
+            "agreement_gated_accuracy_with_ci",
+            "car_curve_with_ci",
+            "MetricResult",
         ]
         for name in metric_names:
             assert name in all_names, f"{name} not in __all__"
+
+
+# ── MetricResult dataclass and BCa bootstrap ──
+
+
+class TestMetricResult:
+    """Frozen MetricResult dataclass invariants."""
+
+    def test_construction_happy(self) -> None:
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        r = MetricResult(
+            value=0.5,
+            ci_lower=0.4,
+            ci_upper=0.6,
+            n_samples=100,
+            confidence=0.95,
+            method="bca",
+        )
+        assert r.value == 0.5
+        assert r.ci_lower <= r.value <= r.ci_upper
+
+    def test_round_trip(self) -> None:
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        r = MetricResult(
+            value=0.5,
+            ci_lower=0.4,
+            ci_upper=0.6,
+            n_samples=10,
+            confidence=0.95,
+            method="bca",
+        )
+        assert MetricResult.from_dict(r.to_dict()) == r
+
+    def test_rejects_negative_n_samples(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="n_samples"):
+            MetricResult(
+                value=0.5,
+                ci_lower=0.4,
+                ci_upper=0.6,
+                n_samples=-1,
+                confidence=0.95,
+                method="bca",
+            )
+
+    def test_rejects_inverted_ci(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="ci_lower"):
+            MetricResult(
+                value=0.5,
+                ci_lower=0.7,
+                ci_upper=0.6,
+                n_samples=10,
+                confidence=0.95,
+                method="bca",
+            )
+
+    def test_rejects_invalid_confidence(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="confidence"):
+            MetricResult(
+                value=0.5,
+                ci_lower=0.4,
+                ci_upper=0.6,
+                n_samples=10,
+                confidence=1.5,
+                method="bca",
+            )
+
+
+def _mixed_results(n: int = 30, seed: int = 0) -> list[QuestionConsistencyResult]:
+    """A reproducible mix of QCRs with varied rc_correct/rc_agree."""
+    import random as _r  # noqa: PLC0415
+
+    rng = _r.Random(seed)
+    return [
+        QuestionConsistencyResult(
+            question_id=f"q{i}",
+            rc_correct=rng.random(),
+            rc_agree=rng.random(),
+            total_variants=5,
+            correct_count=rng.randint(0, 5),
+        )
+        for i in range(n)
+    ]
+
+
+class TestBootstrapCIBCa:
+    """BCa bootstrap returns a tuple of (lower, upper) sane bounds."""
+
+    def test_returns_tuple_of_floats(self) -> None:
+        from llm_consistency.metrics import bootstrap_ci_bca  # noqa: PLC0415
+
+        results = _mixed_results()
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, 0.5)
+
+        lo, hi = bootstrap_ci_bca(results, statistic=stat, n_bootstrap=200, seed=1)
+        assert isinstance(lo, float)
+        assert isinstance(hi, float)
+        assert lo <= hi
+
+    def test_reproducible_with_seed(self) -> None:
+        from llm_consistency.metrics import bootstrap_ci_bca  # noqa: PLC0415
+
+        results = _mixed_results()
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, 0.5)
+
+        a = bootstrap_ci_bca(results, statistic=stat, n_bootstrap=200, seed=42)
+        b = bootstrap_ci_bca(results, statistic=stat, n_bootstrap=200, seed=42)
+        assert a == b
+
+    def test_empty_returns_zeros(self) -> None:
+        from llm_consistency.metrics import bootstrap_ci_bca  # noqa: PLC0415
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, 0.5)
+
+        assert bootstrap_ci_bca([], statistic=stat, n_bootstrap=100, seed=1) == (
+            0.0,
+            0.0,
+        )
+
+    def test_degenerate_falls_back_to_percentile(self) -> None:
+        """When every bootstrap estimate equals the observed value, falls back."""
+        from llm_consistency.metrics import bootstrap_ci_bca  # noqa: PLC0415
+
+        # All-equal rc_correct: every bootstrap resample yields the same MCA.
+        results = [
+            QuestionConsistencyResult(
+                question_id=f"q{i}",
+                rc_correct=1.0,
+                rc_agree=1.0,
+                total_variants=5,
+                correct_count=5,
+            )
+            for i in range(10)
+        ]
+
+        def stat(r: list[QuestionConsistencyResult]) -> float:
+            return mca(r, 0.5)
+
+        lo, hi = bootstrap_ci_bca(results, statistic=stat, n_bootstrap=100, seed=1)
+        assert lo == hi == 1.0
+
+
+class TestMetricsWithCI:
+    """*_with_ci wrappers return MetricResult with sane fields."""
+
+    def test_mca_with_ci(self) -> None:
+        from llm_consistency.metrics import mca_with_ci  # noqa: PLC0415
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        results = _mixed_results()
+        r = mca_with_ci(results, 0.5, n_bootstrap=200, seed=1)
+        assert isinstance(r, MetricResult)
+        assert r.n_samples == len(results)
+        assert r.method == "bca"
+        assert r.ci_lower <= r.value <= r.ci_upper
+
+    def test_mca_with_ci_percentile_method(self) -> None:
+        from llm_consistency.metrics import mca_with_ci  # noqa: PLC0415
+
+        results = _mixed_results()
+        r = mca_with_ci(results, 0.5, n_bootstrap=200, seed=1, method="percentile")
+        assert r.method == "percentile"
+
+    def test_mca_with_ci_unknown_method_raises(self) -> None:
+        from llm_consistency.metrics import mca_with_ci  # noqa: PLC0415
+
+        results = _mixed_results()
+        with pytest.raises(ValueError, match="Unknown bootstrap method"):
+            mca_with_ci(results, 0.5, n_bootstrap=10, seed=1, method="nope")  # type: ignore[arg-type]
+
+    def test_core_index_with_ci(self) -> None:
+        from llm_consistency.metrics import core_index_with_ci  # noqa: PLC0415
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        results = _mixed_results()
+        r = core_index_with_ci(results, n_bootstrap=100, seed=1)
+        assert isinstance(r, MetricResult)
+        assert 0.0 <= r.value <= 1.0
+        assert r.ci_lower <= r.value <= r.ci_upper
+
+    def test_agreement_gated_accuracy_with_ci(self) -> None:
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            agreement_gated_accuracy_with_ci,
+        )
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        results = _mixed_results()
+        r = agreement_gated_accuracy_with_ci(
+            results, tau_agree=0.5, n_bootstrap=100, seed=1
+        )
+        assert isinstance(r, MetricResult)
+        assert r.ci_lower <= r.value <= r.ci_upper
+
+    def test_car_curve_with_ci_default_thresholds(self) -> None:
+        from llm_consistency.metrics import car_curve_with_ci  # noqa: PLC0415
+        from llm_consistency.types import MetricResult  # noqa: PLC0415
+
+        results = _mixed_results()
+        curve = car_curve_with_ci(results, n_bootstrap=100, seed=1)
+        assert len(curve) == 11
+        for c, mr in curve:
+            assert isinstance(c, float)
+            assert isinstance(mr, MetricResult)
+            assert mr.ci_lower <= mr.value <= mr.ci_upper
+
+    def test_car_curve_with_ci_sorts_thresholds(self) -> None:
+        from llm_consistency.metrics import car_curve_with_ci  # noqa: PLC0415
+
+        results = _mixed_results()
+        curve = car_curve_with_ci(
+            results, thresholds=[0.7, 0.1, 0.4], n_bootstrap=50, seed=1
+        )
+        assert [c for c, _ in curve] == [0.1, 0.4, 0.7]
+
+    def test_point_matches_scalar_metric(self) -> None:
+        """The point estimate in MetricResult equals the scalar metric."""
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            core_index_with_ci,
+            mca_with_ci,
+        )
+
+        results = _mixed_results()
+        assert mca_with_ci(results, 0.5, n_bootstrap=50, seed=1).value == pytest.approx(
+            mca(results, 0.5)
+        )
+        assert core_index_with_ci(
+            results, n_bootstrap=50, seed=1
+        ).value == pytest.approx(core_index(results))

@@ -371,6 +371,69 @@ class ScoredResponse:
 
 
 @dataclass(frozen=True, kw_only=True)
+class MetricResult:
+    """A point-estimate with a bootstrap confidence interval.
+
+    Returned by ``*_with_ci`` metric functions. The interval is
+    *one* of several methods, named by :attr:`method`.
+
+    Attributes:
+        value: The point estimate of the metric.
+        ci_lower: Lower bound of the confidence interval.
+        ci_upper: Upper bound of the confidence interval.
+        n_samples: Number of samples (questions) the metric was
+            computed over.
+        confidence: Confidence level (e.g. ``0.95`` for 95% CI).
+        method: Bootstrap method used, e.g. ``"bca"`` or ``"percentile"``.
+    """
+
+    value: float
+    ci_lower: float
+    ci_upper: float
+    n_samples: int
+    confidence: float
+    method: str
+
+    def __post_init__(self) -> None:
+        """Validate construction-time invariants."""
+        if self.n_samples < 0:
+            msg = "MetricResult.n_samples must be non-negative"
+            raise ValidationError(msg)
+        if not (0.0 < self.confidence < 1.0):
+            msg = "MetricResult.confidence must be in (0.0, 1.0)"
+            raise ValidationError(msg)
+        if self.ci_lower > self.ci_upper:
+            msg = (
+                f"MetricResult.ci_lower ({self.ci_lower}) must be "
+                f"<= ci_upper ({self.ci_upper})"
+            )
+            raise ValidationError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary."""
+        return {
+            "value": self.value,
+            "ci_lower": self.ci_lower,
+            "ci_upper": self.ci_upper,
+            "n_samples": self.n_samples,
+            "confidence": self.confidence,
+            "method": self.method,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> MetricResult:
+        """Deserialize from a dictionary."""
+        return cls(
+            value=float(data["value"]),
+            ci_lower=float(data["ci_lower"]),
+            ci_upper=float(data["ci_upper"]),
+            n_samples=int(data["n_samples"]),
+            confidence=float(data["confidence"]),
+            method=str(data["method"]),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class QuestionConsistencyResult:
     """Two-axis consistency result for a single question.
 
