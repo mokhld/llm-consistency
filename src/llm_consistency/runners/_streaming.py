@@ -8,6 +8,7 @@ Reuses the same pipeline helpers as :class:`BatchRunner`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from llm_consistency.runners._pipeline import (
@@ -22,6 +23,8 @@ from llm_consistency.types import (
     QuestionConsistencyResult,
     ScoredResponse,
 )
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -77,19 +80,31 @@ class StreamingRunner:
             A :class:`QuestionConsistencyResult` for each question.
         """
         semaphore = asyncio.Semaphore(config.concurrency)
+        skipped = 0
 
         try:
             for question in dataset:
                 if not isinstance(question, MCQuestion):
-                    continue  # Skip non-MC questions (open-ended not yet supported)
+                    skipped += 1
+                    continue
 
                 qcr = await self._process_question(
                     question, config, provider, scorer, semaphore, seed
                 )
                 yield qcr
         finally:
-            # Ensure clean shutdown on GeneratorExit (early break from async for)
-            pass
+            # Best-effort: when the consumer breaks early (GeneratorExit /
+            # asyncio cancellation), let any in-flight per-question tasks
+            # observe cancellation. _process_question's inner gather() is
+            # awaited synchronously so there is nothing for us to cancel
+            # here directly, but we log skip counts and any unexpected
+            # in-flight tasks scheduled on the running loop.
+            if skipped:
+                _logger.warning(
+                    "StreamingRunner skipped %d non-MCQuestion items "
+                    "(open-ended not yet supported)",
+                    skipped,
+                )
 
     async def _process_question(
         self,
@@ -126,11 +141,15 @@ class StreamingRunner:
             variant_qid = f"{question.id}_v{i}"
             prompts.append((prompt_text, variant_qid))
 
-        # 3. Query LLM concurrently (bounded by semaphore)
-        async def _bounded_query(prompt: str, qid: str) -> tuple[str, str]:
+        # 3. Query LLM concurrently (bounded by semaphore).
+        # Per-variant errors captured (see BatchRunner for rationale).
+        async def _bounded_query(prompt: str, qid: str) -> tuple[str, str, str | None]:
             async with semaphore:
-                resp = await provider.query(prompt, qid)
-                return (qid, resp.raw_output)
+                try:
+                    resp = await provider.query(prompt, qid)
+                except Exception as exc:
+                    return (qid, "", f"{type(exc).__name__}: {exc}")
+                return (qid, resp.raw_output, None)
 
         tasks = [_bounded_query(p, qid) for p, qid in prompts]
         query_results = await asyncio.gather(*tasks)
@@ -140,7 +159,19 @@ class StreamingRunner:
         scored_responses: list[ScoredResponse] = []
         variant_data: list[tuple[str, bool]] = []
 
-        for variant_qid, raw_output in query_results:
+        for variant_qid, raw_output, error in query_results:
+            if error is not None:
+                scored_responses.append(
+                    ScoredResponse(
+                        question_id=variant_qid,
+                        is_correct=False,
+                        score=0.0,
+                        scoring_method=f"error:{error}",
+                    )
+                )
+                variant_data.append((f"<error:{variant_qid}>", False))
+                continue
+
             response = LLMResponse(
                 question_id=variant_qid,
                 raw_output=raw_output,

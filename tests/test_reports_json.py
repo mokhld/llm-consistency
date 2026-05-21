@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import importlib
 import json
-from typing import TYPE_CHECKING
+import os
+import stat
+import sys
+from pathlib import Path
+
+import pytest
 
 from llm_consistency.runners._metadata import RunMetadata
 from llm_consistency.types import (
@@ -13,9 +18,6 @@ from llm_consistency.types import (
     PerturbationType,
     QuestionConsistencyResult,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _make_report() -> EvaluationReport:
@@ -164,3 +166,85 @@ def test_export_json_file_is_parseable(tmp_path: Path) -> None:
     assert isinstance(parsed, dict)
     # Verify it has indentation (pretty-printed)
     assert "\n" in raw
+
+
+def test_export_json_file_respects_umask(tmp_path: Path) -> None:
+    """File permissions follow umask, not mkstemp's default 0o600."""
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX permissions only")
+
+    export_json = _get_export_json()
+    report = _make_report()
+    out = tmp_path / "report.json"
+    export_json(report, out)
+
+    mode = stat.S_IMODE(out.stat().st_mode)
+    umask = os.umask(0)
+    os.umask(umask)
+    expected = 0o666 & ~umask
+    assert mode == expected, f"got {oct(mode)}, expected {oct(expected)}"
+
+
+def test_export_json_file_is_utf8(tmp_path: Path) -> None:
+    """The output file is encoded as UTF-8 regardless of system locale."""
+    export_json = _get_export_json()
+
+    report = _make_report()
+    out = tmp_path / "report.json"
+    export_json(report, out)
+
+    # If the file is not valid UTF-8 this will raise UnicodeDecodeError.
+    raw_bytes = out.read_bytes()
+    raw_bytes.decode("utf-8")
+
+
+def test_export_json_leaves_no_tmp_file(tmp_path: Path) -> None:
+    """Atomic write must not leave behind the temporary file."""
+    export_json = _get_export_json()
+
+    report = _make_report()
+    out = tmp_path / "report.json"
+    export_json(report, out)
+
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "report.json"]
+    assert leftovers == []
+
+
+def test_export_json_overwrites_existing(tmp_path: Path) -> None:
+    """Writing over an existing file replaces it atomically."""
+    export_json = _get_export_json()
+
+    report = _make_report()
+    out = tmp_path / "report.json"
+    out.write_text("STALE", encoding="utf-8")
+
+    export_json(report, out)
+    assert "STALE" not in out.read_text(encoding="utf-8")
+    json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_export_json_cleans_up_tmp_on_replace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If Path.replace fails, the temp file is best-effort removed."""
+    export_json = _get_export_json()
+    report = _make_report()
+    out = tmp_path / "report.json"
+
+    def _boom(_self: object, _dst: object) -> None:
+        msg = "simulated replace failure"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "replace", _boom)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        export_json(report, out)
+
+    # The .tmp file should have been cleaned up (best-effort).
+    leftovers = [
+        p.name
+        for p in tmp_path.iterdir()
+        if p.name.startswith("report.json.") and p.name.endswith(".tmp")
+    ]
+    assert leftovers == []

@@ -6,6 +6,7 @@ import click
 import pytest
 
 from llm_consistency._config_loader import load_config_file
+from llm_consistency._exceptions import ValidationError
 
 
 def test_load_yaml_config(tmp_path: Path) -> None:
@@ -59,3 +60,24 @@ def test_empty_yaml_returns_empty_dict(tmp_path: Path) -> None:
     config_file.write_text("")
     result = load_config_file(config_file)
     assert result == {}
+
+
+def test_invalid_yaml_raises_validation_error(tmp_path: Path) -> None:
+    config_file = tmp_path / "broken.yaml"
+    config_file.write_text("key: : : invalid : : :\n  - nested\n")
+    with pytest.raises(ValidationError, match="Failed to parse YAML"):
+        load_config_file(config_file)
+
+
+def test_non_mapping_yaml_raises_validation_error(tmp_path: Path) -> None:
+    config_file = tmp_path / "list.yaml"
+    config_file.write_text("- 1\n- 2\n- 3\n")
+    with pytest.raises(ValidationError, match="must contain a mapping"):
+        load_config_file(config_file)
+
+
+def test_invalid_toml_raises_validation_error(tmp_path: Path) -> None:
+    config_file = tmp_path / "broken.toml"
+    config_file.write_text("not = valid = toml\n")
+    with pytest.raises(ValidationError, match="Failed to parse TOML"):
+        load_config_file(config_file)

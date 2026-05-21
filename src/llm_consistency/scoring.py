@@ -6,6 +6,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from llm_consistency._exceptions import ValidationError
 from llm_consistency.types import LLMResponse, MCQuestion, ScoredResponse
 
 if TYPE_CHECKING:
@@ -266,3 +267,28 @@ class CustomScorerAdapter(BaseScorer):
             )
             raise TypeError(msg)
         return result
+
+
+_BUILTIN_SCORERS: dict[str, Callable[[], BaseScorer]] = {
+    "exact_match": ExactMatchScorer,
+}
+
+
+def get_scorer(name: str) -> BaseScorer:
+    """Return a built-in scorer by name.
+
+    Args:
+        name: Scorer identifier (e.g. ``"exact_match"``).
+
+    Returns:
+        A new scorer instance.
+
+    Raises:
+        ValidationError: If *name* is not a recognised built-in scorer.
+    """
+    factory = _BUILTIN_SCORERS.get(name)
+    if factory is None:
+        known = sorted(_BUILTIN_SCORERS)
+        msg = f"Unknown scorer {name!r}. Known scorers: {known}"
+        raise ValidationError(msg)
+    return factory()

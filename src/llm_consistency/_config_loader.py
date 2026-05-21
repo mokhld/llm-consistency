@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 import click
 import yaml
 
+from llm_consistency._exceptions import ValidationError
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -27,6 +29,8 @@ def load_config_file(path: Path) -> dict[str, Any]:
     Raises:
         click.BadParameter: If the file format is unsupported.
         FileNotFoundError: If the file does not exist.
+        ValidationError: If the file fails to parse or its top-level
+            value is not a mapping.
     """
     if not path.exists():
         msg = f"Config file not found: {path}"
@@ -35,10 +39,26 @@ def load_config_file(path: Path) -> dict[str, Any]:
     suffix = path.suffix.lower()
     if suffix == ".toml":
         with path.open("rb") as f:
-            return tomllib.load(f)
+            try:
+                return tomllib.load(f)
+            except tomllib.TOMLDecodeError as exc:
+                msg = f"Failed to parse TOML config {path}: {exc}"
+                raise ValidationError(msg) from exc
     if suffix in (".yaml", ".yml"):
         with path.open() as f:
-            result = yaml.safe_load(f)
-            return result if isinstance(result, dict) else {}
+            try:
+                result = yaml.safe_load(f)
+            except yaml.YAMLError as exc:
+                msg = f"Failed to parse YAML config {path}: {exc}"
+                raise ValidationError(msg) from exc
+        if result is None:
+            return {}
+        if not isinstance(result, dict):
+            msg = (
+                f"YAML config {path} must contain a mapping at the top level, "
+                f"got {type(result).__name__}"
+            )
+            raise ValidationError(msg)
+        return result
     msg = f"Unsupported config format: '{suffix}'. Use .yaml, .yml, or .toml"
     raise click.BadParameter(msg)

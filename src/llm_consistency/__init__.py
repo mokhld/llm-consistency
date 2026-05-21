@@ -56,6 +56,7 @@ from llm_consistency.scoring import (
     BaseScorer,
     CustomScorerAdapter,
     ExactMatchScorer,
+    get_scorer,
 )
 from llm_consistency.types import (
     KNOWN_SCORERS,
@@ -116,6 +117,7 @@ __all__ = [
     "export_json",
     "get_perturbation",
     "get_provider",
+    "get_scorer",
     "list_registered_perturbations",
     "mca",
     "normalized_dtw",

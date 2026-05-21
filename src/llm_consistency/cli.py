@@ -14,7 +14,7 @@ from llm_consistency.datasets import MCDataset
 from llm_consistency.providers import get_provider
 from llm_consistency.reports import ConsoleReporter, export_json
 from llm_consistency.runners import BatchRunner, CIRunner
-from llm_consistency.scoring import ExactMatchScorer
+from llm_consistency.scoring import get_scorer
 from llm_consistency.types import EvaluationConfig, PerturbationType
 
 if TYPE_CHECKING:
@@ -76,7 +76,10 @@ def _load_config_callback(
         return
     from pathlib import Path  # noqa: PLC0415
 
-    data = load_config_file(Path(value))
+    try:
+        data = load_config_file(Path(value))
+    except ValidationError as exc:
+        raise click.ClickException(f"Config error: {exc}") from None
     ctx.default_map = ctx.default_map or {}
     ctx.default_map.update(data)
 
@@ -162,35 +165,40 @@ def cli(ctx: click.Context) -> None:
 )
 @click.option(
     "--num-variants",
-    type=int,
+    type=click.IntRange(min=1),
     default=5,
-    help="Variants per question",
+    help="Variants per question (>=1)",
 )
 @click.option(
     "--concurrency",
-    type=int,
+    type=click.IntRange(min=1),
     default=10,
-    help="Max concurrent API calls",
+    help="Max concurrent API calls (>=1)",
 )
-@click.option("--seed", type=int, default=42, help="Random seed")
+@click.option(
+    "--seed",
+    type=click.IntRange(min=0),
+    default=42,
+    help="Random seed (>=0)",
+)
 @click.option("--scorer", default="exact_match", help="Scoring method")
 @click.option(
     "--mca-threshold",
-    type=float,
+    type=click.FloatRange(min=0.0, max=1.0),
     default=1.0,
-    help="MCA threshold for pass/fail",
+    help="MCA threshold for pass/fail (0.0-1.0)",
 )
 @click.option(
     "--core-threshold",
-    type=float,
+    type=click.FloatRange(min=0.0, max=1.0),
     default=None,
-    help="CORE threshold for pass/fail",
+    help="CORE threshold for pass/fail (0.0-1.0)",
 )
 @click.option(
     "--max-budget-usd",
-    type=float,
+    type=click.FloatRange(min=0.0),
     default=None,
-    help="Budget ceiling in USD",
+    help="Budget ceiling in USD (>=0)",
 )
 @click.option("--ci", is_flag=True, help="CI mode: exit 1 on threshold failure")
 @_handle_errors
@@ -229,10 +237,14 @@ def run(
 
     prov = get_provider(provider, model=model)
     ds = MCDataset.load(dataset_path)
-    scoring = ExactMatchScorer()
+    scoring = get_scorer(scorer)
 
     if ci:
-        exit_code = asyncio.run(CIRunner().run(ds, config, prov, scoring, seed=seed))
+        # CIRunner logs failed thresholds via the standard logging module
+        # (visible by default thanks to Python's lastResort handler) and
+        # exposes them on .failures for programmatic access.
+        ci_runner = CIRunner()
+        exit_code = asyncio.run(ci_runner.run(ds, config, prov, scoring, seed=seed))
         raise SystemExit(exit_code)
 
     runner = BatchRunner()
@@ -322,7 +334,7 @@ def compare(config: str, output: str | None) -> None:
 
     # Load dataset once
     ds = MCDataset.load(dataset_path)
-    scoring = ExactMatchScorer()
+    scoring = get_scorer(scorer_name)
 
     # Run per model sequentially
     results_list: list[tuple[str, Any]] = []

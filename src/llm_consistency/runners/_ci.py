@@ -7,6 +7,7 @@ for CI/CD integration.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from llm_consistency.metrics import core_index, mca
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
     from llm_consistency.providers._base import BaseLLMProvider
     from llm_consistency.scoring import BaseScorer
     from llm_consistency.types import EvaluationConfig
+
+_logger = logging.getLogger(__name__)
 
 
 class CIRunner:
@@ -32,6 +35,10 @@ class CIRunner:
     CORE check: only performed when ``config.core_threshold is not None``.
     The CORE index must meet or exceed the threshold.
 
+    When a threshold fails the failure is logged at WARNING level with the
+    actual vs target value, and recorded on the ``failures`` attribute so
+    callers can inspect the result without re-parsing log output.
+
     Examples:
         ::
 
@@ -39,6 +46,9 @@ class CIRunner:
             exit_code = await runner.run(dataset, config, provider, scorer)
             sys.exit(exit_code)
     """
+
+    def __init__(self) -> None:
+        self.failures: tuple[str, ...] = ()
 
     async def run(
         self,
@@ -65,16 +75,28 @@ class CIRunner:
         batch_runner = BatchRunner()
         report = await batch_runner.run(dataset, config, provider, scorer, seed=seed)
 
+        failures: list[str] = []
+
         # 2. Check MCA threshold
-        passed = True
         mca_value = mca(report.results, config.mca_threshold)
         if mca_value < 1.0:
-            passed = False
+            msg = (
+                f"MCA check failed: MCA(threshold={config.mca_threshold:.3f}) "
+                f"= {mca_value:.3f}, expected 1.0"
+            )
+            _logger.warning(msg)
+            failures.append(msg)
 
         # 3. Check CORE threshold (only when configured)
         if config.core_threshold is not None:
             core_value = core_index(report.results)
             if core_value < config.core_threshold:
-                passed = False
+                msg = (
+                    f"CORE check failed: CORE = {core_value:.3f}, "
+                    f"expected >= {config.core_threshold:.3f}"
+                )
+                _logger.warning(msg)
+                failures.append(msg)
 
-        return 0 if passed else 1
+        self.failures = tuple(failures)
+        return 0 if not failures else 1

@@ -35,8 +35,6 @@ def _create_mc_dataset(tmp_path: Path) -> Path:
     return dataset_path
 
 
-
-
 def test_cli_help() -> None:
     result = CliRunner().invoke(cli, ["--help"])
     assert result.exit_code == 0
@@ -54,8 +52,6 @@ def test_cli_version() -> None:
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
     assert "version" in result.output.lower()
-
-
 
 
 def test_run_help() -> None:
@@ -140,8 +136,6 @@ def test_run_with_json_output(tmp_path: Path) -> None:
     assert "results" in data
 
 
-
-
 def test_run_with_yaml_config(tmp_path: Path) -> None:
     dataset_path = _create_mc_dataset(tmp_path)
     config_path = tmp_path / "eval.yaml"
@@ -207,8 +201,6 @@ def test_run_cli_overrides_config(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0, f"CLI override failed: {result.output}"
-
-
 
 
 def test_run_missing_dataset_file() -> None:
@@ -303,8 +295,6 @@ def test_main_entry_point() -> None:
     assert callable(main_fn)
 
 
-
-
 def test_compare_help() -> None:
     result = CliRunner().invoke(cli, ["compare", "--help"])
     assert result.exit_code == 0
@@ -345,8 +335,6 @@ def test_compare_invalid_config_no_models(tmp_path: Path) -> None:
     assert result.exit_code != 0
 
 
-
-
 def test_perturbations_list() -> None:
     result = CliRunner().invoke(cli, ["perturbations", "list"])
     assert result.exit_code == 0
@@ -358,8 +346,6 @@ def test_perturbations_list() -> None:
 def test_perturbations_help() -> None:
     result = CliRunner().invoke(cli, ["perturbations", "--help"])
     assert result.exit_code == 0
-
-
 
 
 def _create_open_ended_dataset(tmp_path: Path) -> Path:
@@ -429,3 +415,90 @@ def test_dataset_validate_nonexistent_file() -> None:
 def test_dataset_help() -> None:
     result = CliRunner().invoke(cli, ["dataset", "--help"])
     assert result.exit_code == 0
+
+
+def test_run_rejects_negative_num_variants(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "--num-variants",
+            "-1",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output or "-1" in result.output
+
+
+def test_run_rejects_out_of_range_mca_threshold(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "--mca-threshold",
+            "2.5",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output or "2.5" in result.output
+
+
+def test_run_rejects_unknown_scorer(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "--scorer",
+            "not_a_real_scorer",
+        ],
+    )
+    # The scorer flag now goes through EvaluationConfig validation which
+    # raises ValidationError for unknown scorers.
+    assert result.exit_code != 0
+
+
+def test_run_happy_path_with_mock(tmp_path: Path) -> None:
+    """End-to-end smoke test of `run` with mock provider."""
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--num-variants",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out_path.exists()
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    assert data["total_questions"] == 2

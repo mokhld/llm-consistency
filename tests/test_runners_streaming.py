@@ -13,6 +13,7 @@ from llm_consistency.types import (
     EvaluationConfig,
     MCOption,
     MCQuestion,
+    OpenEndedQuestion,
     PerturbationType,
     QuestionConsistencyResult,
 )
@@ -174,3 +175,70 @@ class TestStreamingRunnerPublicAPI:
     def test_streaming_runner_importable(self) -> None:
         mod = _get_runners()
         assert hasattr(mod, "StreamingRunner")
+
+
+class _FailingProvider(MockLLMProvider):
+    """MockLLMProvider variant that raises on every query."""
+
+    async def query(  # type: ignore[override]
+        self,
+        prompt: str,
+        question_id: str,
+        *,
+        system: str | None = None,
+    ) -> object:
+        msg = f"simulated provider failure for {question_id}"
+        raise RuntimeError(msg)
+
+
+class TestStreamingRunnerErrorPaths:
+    """Streaming runner skip warning, per-variant error capture."""
+
+    @pytest.mark.asyncio
+    async def test_non_mc_questions_skipped_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mod = importlib.import_module("llm_consistency.runners._streaming")
+
+        oe = OpenEndedQuestion(id="o1", stem="Why?", reference_answers=("because",))
+        mc = _make_question("q1", correct_label="A")
+        dataset = CustomDataset([oe, mc])
+        config = _make_config()
+        provider = MockLLMProvider(model="mock", default_response="A")
+        scorer = ExactMatchScorer()
+
+        runner = mod.StreamingRunner()  # type: ignore[attr-defined]
+        collected: list[QuestionConsistencyResult] = []
+        with caplog.at_level("WARNING", logger="llm_consistency.runners._streaming"):
+            collected = [
+                qcr
+                async for qcr in runner.run_stream(
+                    dataset, config, provider, scorer, seed=42
+                )
+            ]
+
+        assert len(collected) == 1
+        assert any("skipped 1" in rec.message for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_captured_per_variant(self) -> None:
+        mod = importlib.import_module("llm_consistency.runners._streaming")
+        dataset = CustomDataset([_make_question("q1", correct_label="A")])
+        config = _make_config()
+        provider = _FailingProvider(model="mock")
+        scorer = ExactMatchScorer()
+
+        runner = mod.StreamingRunner()  # type: ignore[attr-defined]
+        collected = [
+            qcr
+            async for qcr in runner.run_stream(
+                dataset, config, provider, scorer, seed=42
+            )
+        ]
+
+        assert len(collected) == 1
+        (qcr,) = collected
+        assert qcr.rc_correct == 0.0
+        assert all(
+            sr.scoring_method.startswith("error:") for sr in qcr.scored_responses
+        )

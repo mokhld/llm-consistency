@@ -71,8 +71,18 @@ class OllamaProvider(BaseLLMProvider):  # pragma: no cover
         )
         latency_ms = (time.monotonic() - t0) * 1000
 
+        message = response.get("message") if hasattr(response, "get") else None
+        if not message or "content" not in message:
+            shape = (
+                list(response.keys())
+                if hasattr(response, "keys")
+                else type(response).__name__
+            )
+            msg = f"Ollama response missing 'message.content' field; got: {shape}"
+            raise RuntimeError(msg)
+
         return _RawResponse(
-            content=response["message"]["content"],
+            content=message["content"] or "",
             prompt_tokens=response.get("prompt_eval_count"),
             completion_tokens=response.get("eval_count"),
             latency_ms=latency_ms,

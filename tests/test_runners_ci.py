@@ -167,3 +167,52 @@ class TestCIRunnerPublicAPI:
     def test_ci_runner_importable(self) -> None:
         mod = _get_runners()
         assert hasattr(mod, "CIRunner")
+
+
+class TestCIRunnerFailures:
+    """CIRunner.failures records which thresholds failed and why."""
+
+    @pytest.mark.asyncio
+    async def test_mca_failure_recorded(self) -> None:
+        mod = _get_ci()
+        questions = [_make_question(f"q{i}", correct_label="B") for i in range(3)]
+        dataset = CustomDataset(questions)
+        config = _make_config(mca_threshold=1.0)
+        provider = MockLLMProvider(model="mock", default_response="X")
+        scorer = ExactMatchScorer()
+
+        runner = mod.CIRunner()  # type: ignore[attr-defined]
+        exit_code = await runner.run(dataset, config, provider, scorer, seed=42)
+
+        assert exit_code == 1
+        assert any("MCA check failed" in f for f in runner.failures)
+
+    @pytest.mark.asyncio
+    async def test_core_failure_recorded(self) -> None:
+        mod = _get_ci()
+        questions = [_make_question(f"q{i}", correct_label="B") for i in range(3)]
+        dataset = CustomDataset(questions)
+        config = _make_config(mca_threshold=0.0, core_threshold=0.999)
+        provider = MockLLMProvider(model="mock", default_response="X")
+        scorer = ExactMatchScorer()
+
+        runner = mod.CIRunner()  # type: ignore[attr-defined]
+        exit_code = await runner.run(dataset, config, provider, scorer, seed=42)
+
+        assert exit_code == 1
+        assert any("CORE check failed" in f for f in runner.failures)
+
+    @pytest.mark.asyncio
+    async def test_no_failures_on_pass(self) -> None:
+        mod = _get_ci()
+        q = _make_question("q1", correct_label="B")
+        dataset = CustomDataset([q])
+        config = _make_config()
+        provider = MockLLMProvider(model="mock", default_response="B")
+        scorer = ExactMatchScorer()
+
+        runner = mod.CIRunner()  # type: ignore[attr-defined]
+        exit_code = await runner.run(dataset, config, provider, scorer, seed=42)
+
+        assert exit_code == 0
+        assert runner.failures == ()

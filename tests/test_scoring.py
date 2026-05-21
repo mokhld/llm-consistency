@@ -6,7 +6,13 @@ import importlib
 
 import pytest
 
-from llm_consistency.scoring import BaseScorer, CustomScorerAdapter, ExactMatchScorer
+from llm_consistency._exceptions import ValidationError
+from llm_consistency.scoring import (
+    BaseScorer,
+    CustomScorerAdapter,
+    ExactMatchScorer,
+    get_scorer,
+)
 from llm_consistency.types import LLMResponse, MCOption, MCQuestion, ScoredResponse
 
 # ---------------------------------------------------------------------------
@@ -515,3 +521,21 @@ class TestScoringPublicAPI:
         assert "BaseScorer" in all_names
         assert "ExactMatchScorer" in all_names
         assert "CustomScorerAdapter" in all_names
+
+
+class TestGetScorerRegistry:
+    """get_scorer() looks up scorers by name."""
+
+    def test_get_scorer_returns_exact_match(self) -> None:
+        scorer = get_scorer("exact_match")
+        assert isinstance(scorer, ExactMatchScorer)
+        assert scorer.name == "exact_match"
+
+    def test_get_scorer_unknown_raises(self) -> None:
+        with pytest.raises(ValidationError, match="Unknown scorer"):
+            get_scorer("not_a_real_scorer")
+
+    def test_get_scorer_exposed_in_public_api(self) -> None:
+        mod = importlib.import_module("llm_consistency")
+        assert hasattr(mod, "get_scorer")
+        assert "get_scorer" in mod.__all__

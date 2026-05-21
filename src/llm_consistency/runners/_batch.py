@@ -7,8 +7,10 @@ perturb -> query -> score -> analyze -> report.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
+from llm_consistency._exceptions import ValidationError
 from llm_consistency.runners._metadata import RunMetadata
 from llm_consistency.runners._pipeline import (
     build_scored_qcr,
@@ -22,6 +24,8 @@ from llm_consistency.types import (
     MCQuestion,
     ScoredResponse,
 )
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from rich.progress import Progress
@@ -88,10 +92,13 @@ class BatchRunner:
             )
 
         results: list[QuestionConsistencyResult] = []
+        skipped = 0
 
         for question in dataset:
             if not isinstance(question, MCQuestion):
-                continue  # Skip non-MC questions (open-ended not yet supported)
+                # Non-MC questions (open-ended) are not yet supported.
+                skipped += 1
+                continue
 
             qcr = await self._process_question(
                 question, config, provider, scorer, semaphore, seed
@@ -101,19 +108,25 @@ class BatchRunner:
             if progress is not None and task_id is not None:
                 progress.advance(task_id)
 
+        if skipped:
+            _logger.warning(
+                "BatchRunner skipped %d non-MCQuestion items "
+                "(open-ended not yet supported)",
+                skipped,
+            )
+
         # Compute aggregates
         total_questions = len(results)
+        if total_questions == 0:
+            msg = (
+                "BatchRunner produced zero results: the dataset contained no "
+                "MCQuestion items. An EvaluationReport over zero questions is "
+                "not meaningful."
+            )
+            raise ValidationError(msg)
         total_variants = sum(r.total_variants for r in results)
-        mean_rc_correct = (
-            sum(r.rc_correct for r in results) / total_questions
-            if total_questions > 0
-            else 0.0
-        )
-        mean_rc_agree = (
-            sum(r.rc_agree for r in results) / total_questions
-            if total_questions > 0
-            else 0.0
-        )
+        mean_rc_correct = sum(r.rc_correct for r in results) / total_questions
+        mean_rc_agree = sum(r.rc_agree for r in results) / total_questions
 
         return EvaluationReport(
             config=config,
@@ -156,12 +169,22 @@ class BatchRunner:
             variant_qid = f"{question.id}_v{i}"
             prompts.append((prompt_text, variant_qid))
 
-        # 3. Query LLM concurrently (bounded by semaphore)
-        async def _bounded_query(prompt: str, qid: str) -> tuple[str, str]:
-            """Query with semaphore and return (qid, raw_output)."""
+        # 3. Query LLM concurrently (bounded by semaphore).
+        # Per-variant errors are captured so one failure does not tear down
+        # the whole batch; failed variants are recorded as an empty raw
+        # output plus an ``error`` ScoredResponse so they participate in
+        # rc_correct (always False) and rc_agree (as a distinct sentinel).
+        async def _bounded_query(prompt: str, qid: str) -> tuple[str, str, str | None]:
+            """Query with semaphore and return (qid, raw_output, error)."""
             async with semaphore:
-                resp = await provider.query(prompt, qid)
-                return (qid, resp.raw_output)
+                try:
+                    resp = await provider.query(prompt, qid)
+                except Exception as exc:
+                    # Capture all per-variant failures so one bad call does not
+                    # tear down the batch; the error is recorded on the
+                    # ScoredResponse downstream.
+                    return (qid, "", f"{type(exc).__name__}: {exc}")
+                return (qid, resp.raw_output, None)
 
         tasks = [_bounded_query(p, qid) for p, qid in prompts]
         query_results = await asyncio.gather(*tasks)
@@ -171,7 +194,19 @@ class BatchRunner:
         scored_responses: list[ScoredResponse] = []
         variant_data: list[tuple[str, bool]] = []
 
-        for variant_qid, raw_output in query_results:
+        for variant_qid, raw_output, error in query_results:
+            if error is not None:
+                scored_responses.append(
+                    ScoredResponse(
+                        question_id=variant_qid,
+                        is_correct=False,
+                        score=0.0,
+                        scoring_method=f"error:{error}",
+                    )
+                )
+                variant_data.append((f"<error:{variant_qid}>", False))
+                continue
+
             # Build an LLMResponse for the scorer
             response = LLMResponse(
                 question_id=variant_qid,

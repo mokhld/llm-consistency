@@ -7,6 +7,7 @@ import platform
 
 import pytest
 
+from llm_consistency._exceptions import ValidationError
 from llm_consistency.datasets import CustomDataset
 from llm_consistency.providers._mock import MockLLMProvider
 from llm_consistency.scoring import ExactMatchScorer
@@ -15,6 +16,7 @@ from llm_consistency.types import (
     EvaluationReport,
     MCOption,
     MCQuestion,
+    OpenEndedQuestion,
     PerturbationType,
     PerturbedVariant,
     QuestionConsistencyResult,
@@ -293,3 +295,91 @@ class TestRunnersPublicAPI:
         assert hasattr(mod, "generate_variants_for_question")
         assert hasattr(mod, "render_prompt")
         assert hasattr(mod, "build_scored_qcr")
+
+
+# ---------------------------------------------------------------------------
+# Empty-dataset guard
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRunnerEmptyDataset:
+    """BatchRunner.run() raises ValidationError on zero MC questions."""
+
+    @pytest.mark.asyncio
+    async def test_empty_dataset_raises(self) -> None:
+        mod = _get_batch()
+        dataset = CustomDataset([])
+        config = _make_config()
+        provider = MockLLMProvider(model="mock", default_response="A")
+        scorer = ExactMatchScorer()
+
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        with pytest.raises(ValidationError, match="zero results"):
+            await runner.run(dataset, config, provider, scorer, seed=42)
+
+
+# ---------------------------------------------------------------------------
+# Per-variant error capture
+# ---------------------------------------------------------------------------
+
+
+class _FailingProvider(MockLLMProvider):
+    """MockLLMProvider variant that raises on every query."""
+
+    async def query(  # type: ignore[override]
+        self,
+        prompt: str,
+        question_id: str,
+        *,
+        system: str | None = None,
+    ) -> object:
+        msg = f"simulated provider failure for {question_id}"
+        raise RuntimeError(msg)
+
+
+class TestBatchRunnerErrorCapture:
+    """Provider failures are captured per-variant, not propagated."""
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_does_not_abort_batch(self) -> None:
+        mod = _get_batch()
+        q = _make_question("q1", correct_label="A")
+        dataset = CustomDataset([q])
+        config = _make_config(num_variants=2)
+        provider = _FailingProvider(model="mock")
+        scorer = ExactMatchScorer()
+
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        report = await runner.run(dataset, config, provider, scorer, seed=42)
+
+        # The run completed; the one question is in the report.
+        assert report.total_questions == 1
+        (qcr,) = report.results
+        # All variants failed -> rc_correct is 0 and scoring_method tagged 'error'.
+        assert qcr.rc_correct == 0.0
+        assert all(
+            sr.scoring_method.startswith("error:") for sr in qcr.scored_responses
+        )
+
+
+class TestBatchRunnerSkippedQuestions:
+    """Non-MCQuestion items are skipped with a warning log."""
+
+    @pytest.mark.asyncio
+    async def test_non_mc_questions_warn(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mod = _get_batch()
+        oe = OpenEndedQuestion(id="o1", stem="Why?", reference_answers=("because",))
+        mc = _make_question("q1", correct_label="A")
+        dataset = CustomDataset([oe, mc])
+        config = _make_config()
+        provider = MockLLMProvider(model="mock", default_response="A")
+        scorer = ExactMatchScorer()
+
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        with caplog.at_level("WARNING", logger="llm_consistency.runners._batch"):
+            report = await runner.run(dataset, config, provider, scorer, seed=42)
+
+        assert report.total_questions == 1
+        assert any("skipped 1" in rec.message for rec in caplog.records)

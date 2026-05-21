@@ -69,9 +69,16 @@ class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
         t0 = time.monotonic()
         response = await self._client.chat.completions.create(
             model=self._model,
-            messages=messages,  # type: ignore[arg-type]
+            messages=messages,
         )
         latency_ms = (time.monotonic() - t0) * 1000
+
+        if not response.choices:
+            msg = (
+                f"OpenAI returned no choices for model {self._model!r}; "
+                f"id={getattr(response, 'id', None)!r}"
+            )
+            raise RuntimeError(msg)
 
         choice = response.choices[0]
         return _RawResponse(
