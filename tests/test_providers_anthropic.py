@@ -181,7 +181,9 @@ class TestSendRequest:
         assert raw.content == "B"
         assert raw.prompt_tokens == 15
         assert raw.completion_tokens == 8
-        assert raw.latency_ms > 0
+        # time.monotonic resolution is coarse on Windows (often 16 ms);
+        # an instant mock call can yield exactly 0.0. Allow >= 0.
+        assert raw.latency_ms >= 0.0
 
     @pytest.mark.asyncio
     async def test_system_as_top_level_param(self) -> None:

@@ -9,9 +9,12 @@ via the ``base_url`` parameter.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionMessageParam
 
 
 class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
@@ -61,7 +64,7 @@ class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
         calls the OpenAI Chat Completions API, and maps the
         response to a :class:`_RawResponse`.
         """
-        messages: list[dict[str, str]] = []
+        messages: list[ChatCompletionMessageParam] = []
         if system is not None:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
