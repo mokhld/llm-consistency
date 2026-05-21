@@ -137,6 +137,15 @@ llm-consistency run [OPTIONS]
 | `--core-threshold` | | — | CORE threshold for pass/fail (disabled when unset) |
 | `--max-budget-usd` | | — | Maximum spend in USD (evaluation stops when exceeded) |
 | `--ci` | | `false` | CI mode: suppresses console output, exits with code 0 (pass) or 1 (fail) |
+| `--dry-run` | | `false` | Validate dataset, config, provider, and render one sample prompt without spending tokens |
+
+**Output format is detected from the `--output` extension:**
+
+| Extension | Format |
+|-----------|--------|
+| `.json` (default) | Full report with aggregate metrics + CIs |
+| `.csv` | Per-question flat table (one row per QCR) |
+| `.md` / `.markdown` | Human-readable summary with metric tables |
 
 **Example with all perturbation types:**
 
@@ -162,7 +171,8 @@ llm-consistency compare [OPTIONS]
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `--config` | `-c` | *required* | Config file with `models` list (YAML or TOML) |
-| `--output` | `-o` | — | Output directory for per-model JSON reports |
+| `--output` | `-o` | — | Output directory for per-model reports |
+| `--format` | | `json` | Per-model file format: `json`, `csv`, or `md` |
 
 **Config file format:**
 
@@ -330,6 +340,42 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Resumable Long Runs
+
+Pass `checkpoint_path` to `BatchRunner.run()` to persist each completed
+`QuestionConsistencyResult` to a JSONL file as soon as it's computed. If
+the run crashes (network failure, OOM, ctrl-c, host reboot), restart
+with the same arguments and previously-completed questions are skipped
+— the provider is not re-queried for them.
+
+```python
+report = await runner.run(
+    dataset, config, provider, ExactMatchScorer(),
+    seed=42,
+    checkpoint_path="run-2026-05-21.jsonl",
+)
+```
+
+The checkpoint header records a SHA-256 hash of the `EvaluationConfig`
+and seed. Resuming with a different config or seed raises
+`ValidationError` so results from incompatible runs can't be mixed.
+A crash-truncated final line is detected and skipped on resume; all
+earlier results remain intact. The dataset itself is *not* hashed —
+keep it stable between resumes.
+
+### Alternative Report Formats
+
+```python
+from llm_consistency import export_csv, export_markdown
+
+export_csv(report, "report.csv")           # flat per-question table
+export_markdown(report, "report.md",       # human-readable summary
+                metadata=runner.last_metadata)
+```
+
+The CLI auto-detects format from the `--output` extension (`.csv` →
+CSV, `.md`/`.markdown` → Markdown, anything else → JSON).
 
 ### Custom Perturbations
 
