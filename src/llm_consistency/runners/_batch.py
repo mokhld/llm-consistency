@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import ExitStack
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from llm_consistency._exceptions import ValidationError
+from llm_consistency.runners._checkpoint import CheckpointWriter, read_checkpoint
 from llm_consistency.runners._metadata import RunMetadata
 from llm_consistency.runners._pipeline import (
     build_scored_qcr,
@@ -65,6 +68,7 @@ class BatchRunner:
         *,
         progress: Progress | None = None,
         seed: int = 42,
+        checkpoint_path: str | Path | None = None,
     ) -> EvaluationReport:
         """Run the full evaluation pipeline on a dataset.
 
@@ -75,6 +79,14 @@ class BatchRunner:
             scorer: Scorer for evaluating responses.
             progress: Optional Rich Progress instance for live display.
             seed: Random seed for reproducible perturbation generation.
+            checkpoint_path: If set, persist per-question results to a
+                JSONL file. If the file already exists, it must have
+                been written for the same ``config`` + ``seed`` — those
+                question IDs are then loaded and skipped on this run,
+                making long evaluations resumable across crashes. The
+                dataset is *not* hashed into the checkpoint; users are
+                responsible for keeping the dataset stable across
+                resumes.
 
         Returns:
             A complete :class:`EvaluationReport` with per-question
@@ -83,6 +95,26 @@ class BatchRunner:
         semaphore = asyncio.Semaphore(config.concurrency)
         self.last_metadata = RunMetadata.capture(config, seed)
 
+        ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
+        completed_ids: set[str] = set()
+        results: list[QuestionConsistencyResult] = []
+
+        if (
+            ckpt_path is not None
+            and ckpt_path.exists()
+            and ckpt_path.stat().st_size > 0
+        ):
+            _, prior = read_checkpoint(ckpt_path, config=config, seed=seed)
+            results.extend(prior)
+            completed_ids = {qcr.question_id for qcr in prior}
+            if completed_ids:
+                _logger.info(
+                    "BatchRunner resuming from checkpoint %s: %d question(s) "
+                    "already complete, will be skipped.",
+                    ckpt_path,
+                    len(completed_ids),
+                )
+
         # Set up optional Rich progress task
         task_id = None
         if progress is not None:
@@ -90,23 +122,37 @@ class BatchRunner:
                 "Evaluating questions...",
                 total=len(dataset),
             )
+            if completed_ids:
+                progress.advance(task_id, advance=len(completed_ids))
 
-        results: list[QuestionConsistencyResult] = []
         skipped = 0
 
-        for question in dataset:
-            if not isinstance(question, MCQuestion):
-                # Non-MC questions (open-ended) are not yet supported.
-                skipped += 1
-                continue
+        with ExitStack() as stack:
+            writer: CheckpointWriter | None = None
+            if ckpt_path is not None:
+                writer = stack.enter_context(
+                    CheckpointWriter(ckpt_path, config=config, seed=seed)
+                )
 
-            qcr = await self._process_question(
-                question, config, provider, scorer, semaphore, seed
-            )
-            results.append(qcr)
+            for question in dataset:
+                if not isinstance(question, MCQuestion):
+                    # Non-MC questions (open-ended) are not yet supported.
+                    skipped += 1
+                    continue
 
-            if progress is not None and task_id is not None:
-                progress.advance(task_id)
+                if question.id in completed_ids:
+                    # Already in the checkpoint; do not re-query the provider.
+                    continue
+
+                qcr = await self._process_question(
+                    question, config, provider, scorer, semaphore, seed
+                )
+                results.append(qcr)
+                if writer is not None:
+                    writer.append(qcr)
+
+                if progress is not None and task_id is not None:
+                    progress.advance(task_id)
 
         if skipped:
             _logger.warning(

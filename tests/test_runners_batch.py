@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib
+import json
 import platform
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -22,6 +24,9 @@ from llm_consistency.types import (
     QuestionConsistencyResult,
     ScoredResponse,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -383,3 +388,235 @@ class TestBatchRunnerSkippedQuestions:
 
         assert report.total_questions == 1
         assert any("skipped 1" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint / resume
+# ---------------------------------------------------------------------------
+
+
+class _CountingProvider(MockLLMProvider):
+    """MockLLMProvider that records which question_ids it was queried for."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.queried_ids: list[str] = []
+
+    async def query(  # type: ignore[override]
+        self,
+        prompt: str,
+        question_id: str,
+        *,
+        system: str | None = None,
+    ) -> object:
+        self.queried_ids.append(question_id)
+        return await super().query(prompt, question_id, system=system)
+
+
+def _read_qcr_ids_from_checkpoint(path: Path) -> list[str]:
+    """Helper: list question IDs present in a checkpoint file (qcr lines only)."""
+    ids: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        if obj.get("type") == "qcr":
+            ids.append(obj["qcr"]["question_id"])
+    return ids
+
+
+class TestBatchRunnerCheckpointResume:
+    """Checkpoint persistence and resume semantics in BatchRunner.run()."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_run_with_checkpoint_writes_all_qcrs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mod = _get_batch()
+        questions = [_make_question(f"q{i}") for i in range(3)]
+        dataset = CustomDataset(questions)
+        config = _make_config(num_variants=2)
+        provider = MockLLMProvider(model="mock")
+        scorer = ExactMatchScorer()
+        ckpt = tmp_path / "run.jsonl"
+
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        report = await runner.run(
+            dataset, config, provider, scorer, seed=42, checkpoint_path=ckpt
+        )
+
+        assert report.total_questions == 3
+        assert _read_qcr_ids_from_checkpoint(ckpt) == ["q0", "q1", "q2"]
+
+    @pytest.mark.asyncio
+    async def test_resume_skips_completed_questions(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mod = _get_batch()
+        questions = [_make_question(f"q{i}") for i in range(4)]
+        dataset = CustomDataset(questions)
+        config = _make_config(num_variants=2)
+        scorer = ExactMatchScorer()
+        ckpt = tmp_path / "run.jsonl"
+
+        # First run: complete the first 2 questions only.
+        partial_provider = _CountingProvider(model="mock")
+        partial_runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        await partial_runner.run(
+            CustomDataset(questions[:2]),
+            config,
+            partial_provider,
+            scorer,
+            seed=42,
+            checkpoint_path=ckpt,
+        )
+        assert _read_qcr_ids_from_checkpoint(ckpt) == ["q0", "q1"]
+
+        # Resume against the full dataset.
+        resume_provider = _CountingProvider(model="mock")
+        resume_runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        report = await resume_runner.run(
+            dataset,
+            config,
+            resume_provider,
+            scorer,
+            seed=42,
+            checkpoint_path=ckpt,
+        )
+
+        # Only q2 and q3 should have been re-queried; q0/q1 came from the
+        # checkpoint, which means no variant of q0/q1 hit the provider.
+        for qid in resume_provider.queried_ids:
+            assert qid.startswith(("q2_", "q3_")), (
+                f"resume provider unexpectedly queried {qid}"
+            )
+
+        # Final report should cover all 4 questions in dataset order.
+        assert report.total_questions == 4
+        assert [r.question_id for r in report.results] == ["q0", "q1", "q2", "q3"]
+        assert _read_qcr_ids_from_checkpoint(ckpt) == ["q0", "q1", "q2", "q3"]
+
+    @pytest.mark.asyncio
+    async def test_resume_with_mismatched_config_raises(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mod = _get_batch()
+        questions = [_make_question(f"q{i}") for i in range(2)]
+        dataset = CustomDataset(questions)
+        config_a = _make_config(num_variants=2)
+        config_b = _make_config(num_variants=5)
+        provider = MockLLMProvider(model="mock")
+        scorer = ExactMatchScorer()
+        ckpt = tmp_path / "run.jsonl"
+
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        await runner.run(
+            dataset, config_a, provider, scorer, seed=42, checkpoint_path=ckpt
+        )
+
+        with pytest.raises(ValidationError, match="different config"):
+            await runner.run(
+                dataset, config_b, provider, scorer, seed=42, checkpoint_path=ckpt
+            )
+
+    @pytest.mark.asyncio
+    async def test_resume_with_different_seed_raises(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        mod = _get_batch()
+        questions = [_make_question(f"q{i}") for i in range(2)]
+        dataset = CustomDataset(questions)
+        config = _make_config(num_variants=2)
+        provider = MockLLMProvider(model="mock")
+        scorer = ExactMatchScorer()
+        ckpt = tmp_path / "run.jsonl"
+
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        await runner.run(
+            dataset, config, provider, scorer, seed=42, checkpoint_path=ckpt
+        )
+
+        with pytest.raises(ValidationError, match="different config"):
+            await runner.run(
+                dataset, config, provider, scorer, seed=99, checkpoint_path=ckpt
+            )
+
+    @pytest.mark.asyncio
+    async def test_full_resume_no_new_queries_required(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """If the checkpoint already covers the whole dataset, the
+        provider must not be queried at all on resume."""
+        mod = _get_batch()
+        questions = [_make_question(f"q{i}") for i in range(3)]
+        dataset = CustomDataset(questions)
+        config = _make_config(num_variants=2)
+        scorer = ExactMatchScorer()
+        ckpt = tmp_path / "run.jsonl"
+
+        first_provider = MockLLMProvider(model="mock")
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        original = await runner.run(
+            dataset, config, first_provider, scorer, seed=42, checkpoint_path=ckpt
+        )
+
+        # Resume with a counting provider; expect zero queries.
+        second_provider = _CountingProvider(model="mock")
+        resumed = await runner.run(
+            dataset, config, second_provider, scorer, seed=42, checkpoint_path=ckpt
+        )
+
+        assert second_provider.queried_ids == []
+        assert resumed.total_questions == original.total_questions
+        assert [r.question_id for r in resumed.results] == [
+            r.question_id for r in original.results
+        ]
+
+    @pytest.mark.asyncio
+    async def test_resume_truncated_last_line_does_not_corrupt_run(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A crash-truncated final QCR line is skipped on resume; the
+        affected question gets re-queried and the report still has all
+        results."""
+        mod = _get_batch()
+        questions = [_make_question(f"q{i}") for i in range(3)]
+        dataset = CustomDataset(questions)
+        config = _make_config(num_variants=2)
+        scorer = ExactMatchScorer()
+        ckpt = tmp_path / "run.jsonl"
+
+        first_provider = MockLLMProvider(model="mock")
+        runner = mod.BatchRunner()  # type: ignore[attr-defined]
+        await runner.run(
+            CustomDataset(questions[:2]),
+            config,
+            first_provider,
+            scorer,
+            seed=42,
+            checkpoint_path=ckpt,
+        )
+
+        # Simulate a partial write by appending an unterminated qcr line.
+        with ckpt.open("a", encoding="utf-8") as fh:
+            fh.write('{"type": "qcr", "qcr": {"question_id": "q9"')  # no newline
+
+        # Resume with the full dataset; the bogus line is dropped.
+        resume_provider = _CountingProvider(model="mock")
+        report = await runner.run(
+            dataset, config, resume_provider, scorer, seed=42, checkpoint_path=ckpt
+        )
+
+        # q0 and q1 came from the checkpoint; only q2 should have been re-queried.
+        for qid in resume_provider.queried_ids:
+            assert qid.startswith("q2_"), (
+                f"unexpected requery of {qid}; partial-write recovery is broken"
+            )
+        assert report.total_questions == 3
+        assert [r.question_id for r in report.results] == ["q0", "q1", "q2"]
