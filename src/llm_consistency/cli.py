@@ -12,13 +12,19 @@ from llm_consistency._config_loader import load_config_file
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
 from llm_consistency.datasets import MCDataset
 from llm_consistency.providers import get_provider
+from llm_consistency.providers._cost import estimate_cost
 from llm_consistency.reports import ConsoleReporter, export_json
 from llm_consistency.runners import BatchRunner, CIRunner
+from llm_consistency.runners._pipeline import (
+    generate_variants_for_question,
+    render_prompt,
+)
 from llm_consistency.scoring import get_scorer
-from llm_consistency.types import EvaluationConfig, PerturbationType
+from llm_consistency.types import EvaluationConfig, MCQuestion, PerturbationType
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -116,6 +122,84 @@ def _parse_perturbation_types(
     return tuple(result)
 
 
+def _dry_run_report(
+    config: EvaluationConfig,
+    dataset: MCDataset,
+    provider: Any,
+    scorer: Any,
+    *,
+    seed: int,
+) -> None:
+    """Print a dry-run summary without spending provider tokens.
+
+    Validates that variants can be generated and a prompt rendered for
+    the first MCQuestion in the dataset (so users learn about pipeline
+    wiring bugs before paying for them), then prints a summary with an
+    estimated cost for known models.
+    """
+    mc_questions = [q for q in dataset if isinstance(q, MCQuestion)]
+    if not mc_questions:
+        msg = "Dataset contains no MCQuestion items; nothing to evaluate."
+        raise click.ClickException(msg)
+
+    sample = mc_questions[0]
+    variants = generate_variants_for_question(sample, config, seed)
+    if not variants:
+        msg = "Pipeline produced zero variants for the first question."
+        raise click.ClickException(msg)
+    sample_prompt = render_prompt(variants[0])
+
+    num_questions = len(mc_questions)
+    num_calls = num_questions * config.num_variants
+    estimated_usd = estimate_cost(config.model, num_calls)
+    cost_str = (
+        f"~${estimated_usd:.4f}" if estimated_usd > 0 else "unknown (model not priced)"
+    )
+
+    click.echo("Dry run — no provider calls made.")
+    click.echo(f"  model:               {config.model}")
+    click.echo(f"  provider:            {config.provider}")
+    click.echo(f"  scorer:              {config.scorer}")
+    click.echo(
+        "  perturbations:       "
+        + ", ".join(pt.value for pt in config.perturbation_types)
+    )
+    click.echo(f"  questions (MC):      {num_questions}")
+    click.echo(f"  variants per Q:      {config.num_variants}")
+    click.echo(f"  total provider calls:{num_calls}")
+    click.echo(f"  estimated cost:      {cost_str}")
+    click.echo(f"  provider class:      {type(provider).__name__}")
+    click.echo(f"  scorer class:        {type(scorer).__name__}")
+    click.echo("")
+    click.echo("Sample prompt (variant 0 of first question):")
+    click.echo("  " + sample_prompt.replace("\n", "\n  "))
+
+
+def _export_report(
+    report: Any,
+    path: Path,
+    *,
+    metadata: Any = None,
+) -> None:
+    """Route an :class:`EvaluationReport` to the right exporter by extension.
+
+    Recognises ``.csv`` and ``.md``/``.markdown``; everything else falls
+    back to JSON, preserving the historical default.
+    """
+    from llm_consistency.reports import (  # noqa: PLC0415
+        export_csv,
+        export_markdown,
+    )
+
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        export_csv(report, path)
+    elif suffix in {".md", ".markdown"}:
+        export_markdown(report, path, metadata=metadata)
+    else:
+        export_json(report, path, metadata=metadata)
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(package_name="llm-consistency")
 @click.pass_context
@@ -201,6 +285,15 @@ def cli(ctx: click.Context) -> None:
     help="Budget ceiling in USD (>=0)",
 )
 @click.option("--ci", is_flag=True, help="CI mode: exit 1 on threshold failure")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Validate dataset, config, and provider without spending tokens. "
+        "Renders one prompt for the first question to prove the pipeline "
+        "wires up end-to-end."
+    ),
+)
 @_handle_errors
 def run(
     model: str,
@@ -216,6 +309,7 @@ def run(
     core_threshold: float | None,
     max_budget_usd: float | None,
     ci: bool,
+    dry_run: bool,
 ) -> None:
     """Execute an evaluation run."""
     from pathlib import Path  # noqa: PLC0415
@@ -239,6 +333,10 @@ def run(
     ds = MCDataset.load(dataset_path)
     scoring = get_scorer(scorer)
 
+    if dry_run:
+        _dry_run_report(config, ds, prov, scoring, seed=seed)
+        return
+
     if ci:
         # CIRunner logs failed thresholds via the standard logging module
         # (visible by default thanks to Python's lastResort handler) and
@@ -252,7 +350,7 @@ def run(
     ConsoleReporter().display(report, threshold=mca_threshold)
 
     if output:
-        export_json(report, Path(output), metadata=runner.last_metadata)
+        _export_report(report, Path(output), metadata=runner.last_metadata)
 
 
 @cli.group()
@@ -287,10 +385,18 @@ def perturbations_list() -> None:
     "-o",
     type=click.Path(),
     default=None,
-    help="JSON output directory for per-model reports",
+    help="Output directory for per-model reports",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "csv", "md"], case_sensitive=False),
+    default="json",
+    show_default=True,
+    help="Per-model report file format when --output is set.",
 )
 @_handle_errors
-def compare(config: str, output: str | None) -> None:
+def compare(config: str, output: str | None, output_format: str) -> None:
     """Compare multiple models on the same evaluation."""
     from pathlib import Path  # noqa: PLC0415
 
@@ -366,12 +472,13 @@ def compare(config: str, output: str | None) -> None:
         ConsoleReporter().display(report, threshold=mca_threshold)
         click.echo("")
 
-    # Export per-model JSON if output specified
+    # Export per-model reports in the requested format if --output is set.
     if output:
         out_dir = Path(output)
         out_dir.mkdir(parents=True, exist_ok=True)
+        ext = {"json": ".json", "csv": ".csv", "md": ".md"}[output_format.lower()]
         for model_name, report in results_list:
-            export_json(report, out_dir / f"{model_name}.json")
+            _export_report(report, out_dir / f"{model_name}{ext}")
 
 
 @cli.group()

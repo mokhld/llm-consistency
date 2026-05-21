@@ -502,3 +502,163 @@ def test_run_happy_path_with_mock(tmp_path: Path) -> None:
     assert out_path.exists()
     data = json.loads(out_path.read_text(encoding="utf-8"))
     assert data["total_questions"] == 2
+
+
+# ---------------------------------------------------------------------------
+# --dry-run flag
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_in_help() -> None:
+    result = CliRunner().invoke(cli, ["run", "--help"])
+    assert result.exit_code == 0
+    assert "--dry-run" in result.output
+
+
+def test_dry_run_unknown_model_reports_unknown_cost(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "--num-variants",
+            "3",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Dry run" in result.output
+    assert "questions (MC):      2" in result.output
+    assert "variants per Q:      3" in result.output
+    assert "total provider calls:6" in result.output
+    assert "unknown (model not priced)" in result.output
+    assert "Sample prompt" in result.output
+
+
+def test_dry_run_known_model_shows_estimated_cost(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "gpt-4o",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "--num-variants",
+            "2",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "estimated cost:      ~$" in result.output
+
+
+def test_dry_run_does_not_write_output(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert not out_path.exists(), "dry-run must not write the output file"
+
+
+# ---------------------------------------------------------------------------
+# --output format routing
+# ---------------------------------------------------------------------------
+
+
+def test_run_output_csv_by_extension(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.csv"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--num-variants",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = out_path.read_text(encoding="utf-8")
+    assert text.splitlines()[0].startswith("question_id,rc_correct,")
+    assert "q1," in text and "q2," in text
+
+
+def test_run_output_markdown_by_extension(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.md"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--num-variants",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = out_path.read_text(encoding="utf-8")
+    assert text.startswith("# LLM Consistency Report")
+    assert "## Aggregate metrics" in text
+    assert "| q1 |" in text
+
+
+def test_run_output_unknown_extension_falls_back_to_json(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.xyz"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--num-variants",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(out_path.read_text(encoding="utf-8"))
+    assert data["total_questions"] == 2
