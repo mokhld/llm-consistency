@@ -4,8 +4,8 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-490%20passed-brightgreen.svg)]()
-[![Coverage](https://img.shields.io/badge/coverage-95.48%25-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-591%20passed-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-95.15%25-brightgreen.svg)]()
 [![Type Checked](https://img.shields.io/badge/mypy-strict-blue.svg)]()
 
 llm-consistency implements the [CAT framework](https://arxiv.org/abs/2512.23711) (Cavalin et al., 2025) for evaluating LLM robustness under controlled input variations. It automates the full pipeline: load a dataset, apply deterministic perturbations (option reorder, format change, separator change), query any LLM provider, score responses, and compute paper-faithful MCA, CAR, and CORE metrics — all from a single CLI command or Python API call.
@@ -662,27 +662,29 @@ The paper defines MCA, CORE, and CAR curves but leaves perturbation generation m
 
 ## Contributing
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, quality
+gates, commit conventions, and how to add a perturbation, scorer, or
+provider. Quick start:
+
 ```bash
-# Clone and install
 git clone https://github.com/mokhld/llm-consistency.git
 cd llm-consistency
 uv sync --group dev
-
-# Run tests
 uv run pytest
-
-# Type check
-uv run mypy src/llm_consistency/
-
-# Lint and format
-uv run ruff check src/ tests/
-uv run ruff format src/ tests/
 ```
 
-All contributions must pass:
-- `pytest` (490+ tests, >= 95% coverage)
-- `mypy --strict` (no errors)
-- `ruff check` and `ruff format` (no violations)
+Runnable end-to-end examples live in [`examples/`](examples/) — every
+script uses the mock provider, so they execute without API keys or
+network access:
+
+```bash
+uv run python examples/01_basic_mock.py
+uv run python examples/05_export_formats.py
+```
+
+Changes are tracked in [`CHANGELOG.md`](CHANGELOG.md). The
+audit-driven roadmap lives in [`AUDIT.md`](AUDIT.md) — findings
+tagged Done / Skipped / Outstanding with commit hashes.
 
 ## License
 
