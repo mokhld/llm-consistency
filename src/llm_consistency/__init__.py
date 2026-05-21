@@ -49,6 +49,7 @@ from llm_consistency.providers import (
 from llm_consistency.reports import (
     ConsoleReporter,
     export_csv,
+    export_html,
     export_json,
     export_markdown,
     render_car_ascii,
@@ -128,6 +129,7 @@ __all__ = [
     "dtw_distance",
     "estimate_cost",
     "export_csv",
+    "export_html",
     "export_json",
     "export_markdown",
     "get_perturbation",

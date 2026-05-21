@@ -146,6 +146,7 @@ llm-consistency run [OPTIONS]
 | `.json` (default) | Full report with aggregate metrics + CIs |
 | `.csv` | Per-question flat table (one row per QCR) |
 | `.md` / `.markdown` | Human-readable summary with metric tables |
+| `.html` / `.htm` | Self-contained single-page HTML (inline CSS, no JS) |
 
 **Example with all perturbation types:**
 
@@ -172,7 +173,7 @@ llm-consistency compare [OPTIONS]
 |--------|-------|---------|-------------|
 | `--config` | `-c` | *required* | Config file with `models` list (YAML or TOML) |
 | `--output` | `-o` | — | Output directory for per-model reports |
-| `--format` | | `json` | Per-model file format: `json`, `csv`, or `md` |
+| `--format` | | `json` | Per-model file format: `json`, `csv`, `md`, or `html` |
 
 **Config file format:**
 
@@ -367,15 +368,19 @@ keep it stable between resumes.
 ### Alternative Report Formats
 
 ```python
-from llm_consistency import export_csv, export_markdown
+from llm_consistency import export_csv, export_html, export_markdown
 
 export_csv(report, "report.csv")           # flat per-question table
 export_markdown(report, "report.md",       # human-readable summary
                 metadata=runner.last_metadata)
+export_html(report, "report.html",         # self-contained HTML page
+            metadata=runner.last_metadata)
 ```
 
-The CLI auto-detects format from the `--output` extension (`.csv` →
-CSV, `.md`/`.markdown` → Markdown, anything else → JSON).
+The CLI auto-detects format from the `--output` extension: `.csv` →
+CSV, `.md`/`.markdown` → Markdown, `.html`/`.htm` → HTML, anything
+else → JSON. The HTML output bundles its CSS inline and uses no
+JavaScript or external assets — open the file directly from disk.
 
 ### Custom Perturbations
 

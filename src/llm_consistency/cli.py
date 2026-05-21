@@ -183,11 +183,12 @@ def _export_report(
 ) -> None:
     """Route an :class:`EvaluationReport` to the right exporter by extension.
 
-    Recognises ``.csv`` and ``.md``/``.markdown``; everything else falls
-    back to JSON, preserving the historical default.
+    Recognises ``.csv``, ``.md``/``.markdown``, and ``.html``/``.htm``;
+    everything else falls back to JSON, preserving the historical default.
     """
     from llm_consistency.reports import (  # noqa: PLC0415
         export_csv,
+        export_html,
         export_markdown,
     )
 
@@ -196,6 +197,8 @@ def _export_report(
         export_csv(report, path)
     elif suffix in {".md", ".markdown"}:
         export_markdown(report, path, metadata=metadata)
+    elif suffix in {".html", ".htm"}:
+        export_html(report, path, metadata=metadata)
     else:
         export_json(report, path, metadata=metadata)
 
@@ -390,7 +393,7 @@ def perturbations_list() -> None:
 @click.option(
     "--format",
     "output_format",
-    type=click.Choice(["json", "csv", "md"], case_sensitive=False),
+    type=click.Choice(["json", "csv", "md", "html"], case_sensitive=False),
     default="json",
     show_default=True,
     help="Per-model report file format when --output is set.",
@@ -476,7 +479,12 @@ def compare(config: str, output: str | None, output_format: str) -> None:
     if output:
         out_dir = Path(output)
         out_dir.mkdir(parents=True, exist_ok=True)
-        ext = {"json": ".json", "csv": ".csv", "md": ".md"}[output_format.lower()]
+        ext = {
+            "json": ".json",
+            "csv": ".csv",
+            "md": ".md",
+            "html": ".html",
+        }[output_format.lower()]
         for model_name, report in results_list:
             _export_report(report, out_dir / f"{model_name}{ext}")
 

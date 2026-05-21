@@ -640,6 +640,56 @@ def test_run_output_markdown_by_extension(tmp_path: Path) -> None:
     assert "| q1 |" in text
 
 
+def test_run_output_html_by_extension(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.html"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--num-variants",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = out_path.read_text(encoding="utf-8")
+    assert text.startswith("<!DOCTYPE html>")
+    assert "<h1>LLM Consistency Report</h1>" in text
+    assert "<td>q1</td>" in text
+
+
+def test_run_output_htm_alias_routes_to_html(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.htm"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "mock",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--num-variants",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = out_path.read_text(encoding="utf-8")
+    assert text.startswith("<!DOCTYPE html>")
+
+
 def test_run_output_unknown_extension_falls_back_to_json(tmp_path: Path) -> None:
     dataset_path = _create_mc_dataset(tmp_path)
     out_path = tmp_path / "report.xyz"
