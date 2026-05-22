@@ -125,9 +125,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- AUDIT.md — full multi-agent review of the v1.0 codebase with §1
-  feature inventory, §2 bugs, §3 improvements, §4 prioritisation,
-  and §5 cumulative "what's been done" changelog keyed by commit hash.
 - README updated with checkpoint/resume, export formats, dry-run, and
   bootstrap CI sections; pointer to `CONTRIBUTING.md` and
   `examples/`.

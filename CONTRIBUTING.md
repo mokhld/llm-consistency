@@ -153,28 +153,11 @@ To add a new provider `foo`:
    pricing table in
    [`providers/_cost.py`](src/llm_consistency/providers/_cost.py).
 
-## The audit-driven roadmap
+## Reporting bugs and proposing changes
 
-[`AUDIT.md`](AUDIT.md) at the repo root is a living document. Five
-parallel Explore agents reviewed every file in the codebase on
-2026-05-21 and catalogued every finding (bug or improvement) with a
-file:line citation. The audit drives the active backlog:
-
-- **§2 Bugs** — concrete defects, severity-tagged.
-- **§3 Improvements** — non-bug enhancements grouped by area.
-- **§4 Prioritisation** — recommended order (Now / Next / Then tiers).
-- **§5 What's been done** — cumulative changelog of fixes that have
-  landed, keyed by commit hash.
-
-When you land a fix that closes an audit item, edit `AUDIT.md` to mark
-it **✅ Done — `<commit hash>`** and add a `### Commit <hash>` block
-under §5 summarising the change. This keeps the audit and the codebase
-synchronised so future contributors don't redo work.
-
-If you find a new bug or want to propose an enhancement that isn't in
-the audit yet, file an issue rather than appending to `AUDIT.md` — the
-audit reflects a point-in-time review; new findings go through normal
-issue triage.
+File a GitHub issue for bugs or enhancement proposals. Include a
+minimal reproducer for bugs and the motivating use case for
+enhancements.
 
 ## Running the examples
 

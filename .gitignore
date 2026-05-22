@@ -1,4 +1,4 @@
-# Planning (GSD)
+# Planning notes
 .planning/
 
 # hatch-vcs generated version file
@@ -27,5 +27,5 @@ htmlcov/
 # Test artefacts (end-to-end test outputs)
 .test-artefacts/
 
-# Content (marketing, articles, GTM)
+# Content drafts
 .content/
