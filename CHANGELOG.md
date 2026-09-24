@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--min-mca` / `min_mca` (`EvaluationConfig.min_mca`, default 1.0):
+  the MCA pass target, separate from the consistency level
+  `--mca-threshold`.
+- `--rpm` / `rpm`: requests per minute passed to the provider's rate
+  limiter.
+- `pricing=CostPerToken(...)` provider argument for models missing from
+  the pricing table, and a price for `claude-haiku-4-5-20251001`.
+- `EmptyResponseError` for truncated or reasoning-only responses.
+- `PresentedOption` and `PerturbedVariant.presented_options`, recording
+  the labels each variant showed the model and the matching original
+  labels.
+- `BaseLLMProvider.max_budget_usd` property.
+- `compare` prints a comparison table with CORE, MCA, mean RC and the
+  McNemar p-value against the first model.
+- `MCDataset.load_from_hub(answer_format=...)`, with numeric-string
+  answers such as HellaSwag's "2" and an error for ambiguous answers.
+- Dry-run warns when the estimated cost exceeds `--max-budget-usd`.
+
 - Per-perturbation variance decomposition —
   `perturbation_impact(report)` returns
   `dict[PerturbationType, float]` mapping each perturbation type to
@@ -85,8 +103,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WARNING with actual vs target values.
   ([`c986eaa`](https://github.com/mokhld/llm-consistency/commit/c986eaa))
 
+### Changed
+
+- `option_reorder` and numbered-format answers are scored against the
+  options as the model saw them, and `answer_distribution` is keyed by
+  each option's label in the original question. Scores for
+  `option_reorder` runs are not comparable with earlier releases (see
+  Fixed).
+- Scorers, including `CustomScorerAdapter` callables, receive an
+  `MCQuestion` built from the variant's presented options instead of the
+  original question. A custom scorer that looks answers up by the
+  original label (for example, an external answer key) must use the
+  `is_correct` flags on the options it receives instead.
+- The answer extractor matches labels case-sensitively unless the whole
+  output is a single character, so "Answer: b" is no longer read as B.
+- `BudgetExceededError` now aborts `BatchRunner`, `StreamingRunner` and
+  `CIRunner` runs instead of being recorded as failed variants. The CLI
+  exits 1 with a clear message and writes no report.
+- `--ci` also fails when any variant failed with a provider error.
+  Console MCA status uses the same rule as CI, CORE shows "n/a" without
+  a threshold, and the Mean RC rows no longer show PASS/FAIL.
+- Config files reject unknown keys and list the valid ones.
+- Setting `max_budget_usd` for a model with no known price raises
+  `ValidationError`; pass `pricing=CostPerToken(...)` to the provider.
+- `KNOWN_SCORERS` lists only implemented scorers (`exact_match`).
+  `EvaluationConfig(scorer="llm_judge")` or `"semantic_similarity"`, and
+  loading a report saved with either name, now raise `ValidationError`.
+- Providers no longer retry `PermissionError` or HTTP 400/401/403/404.
+- The rate limiter's initial burst is a tenth of a minute of requests
+  rather than a full minute, and each retry takes a token. Because the
+  limiter used to run at twice the configured rate, runs at the default
+  `--rpm 60` now take about twice as long; raise `--rpm` for local models
+  or higher API quotas.
+- `option_reorder` on questions with 8 or more options now samples
+  permutations directly, so the same seed gives different variants than
+  earlier releases for those questions.
+- `BatchRunner` evaluates up to `config.concurrency` questions at once.
+  `StreamingRunner` evaluates that many ahead of the consumer and still
+  yields in dataset order.
+- Questions with failed variants are not written to the checkpoint, so
+  a resume retries them. The checkpoint config hash covers only
+  result-affecting fields (model, provider, perturbation types, scorer,
+  num_variants, seed), so changing concurrency, budget or thresholds no
+  longer blocks a resume. The checkpoint format is now version 2;
+  version 1 checkpoints from earlier releases are rejected, because
+  their `option_reorder` results were scored against the wrong labels.
+- Variants from a custom perturbation that does not set
+  `presented_options` trigger a `UserWarning`, because the runner then
+  assumes every option kept its original label.
+- `core_index` requires a threshold grid that includes 0.0 and 1.0;
+  metric thresholds must lie in [0, 1]; `confidence` must lie in (0, 1)
+  and `n_bootstrap` must be at least 1.
+- `QuestionConsistencyResult` validates its counts and rates at
+  construction.
+- `validate_sample_size` returns `power_at_n` (`observed_power` is kept)
+  and is documented as a one-sample proportion test. Its small-sample
+  warning no longer cites the CAT paper.
+
 ### Fixed
 
+- `option_reorder` variants were scored against the original question's
+  labels, so a model that always chose the correct option scored about
+  0.22 RC_correct on four-option questions, and agreement was measured
+  on letter positions. The numbered format template's answers ("2")
+  were never extracted.
+- The answer extractor misread "Answer: Definitely C" (as D), "The
+  answer is clearly B." (as C), sentence-initial "A", and negated labels.
+- Transient provider errors (rate limits, timeouts, connection errors,
+  HTTP 408/409/429/5xx, Anthropic 529) were never retried and were
+  scored as wrong answers. Each provider now retries them and honours
+  `retry-after`.
+- `--max-budget-usd` was never passed to the provider, so no budget was
+  enforced from the CLI. Concurrent requests could also overshoot the
+  cap several times over. Budget checks and reservations are now atomic;
+  with a budget set, the first request runs alone and later requests
+  reserve the largest cost seen so far (and at least an estimate based on
+  prompt length). A request that times out or is cancelled keeps its
+  reservation. The cap can still be exceeded by the in-flight requests if
+  a response costs more than any before it. The runners warn when
+  `EvaluationConfig.max_budget_usd` is set but the provider was created
+  without a budget.
+- The rate limiter ran at twice the configured rate.
+- `BatchRunner` ran questions one at a time, so `--concurrency` above
+  the number of variants per question had no effect.
+- `option_reorder` enumerated every permutation before sampling (3.6M
+  tuples, about 500 MB, for 10 options). It now samples directly when
+  there are more than 7 options.
+- The README's `run:` / `[run]` config format did not load, and config
+  values were silently dropped. The `dataset` key is now honoured.
+- `--ci -o` wrote no report. `--ci` required MCA(c) == 1.0 while the
+  console showed PASS for MCA(c) >= c; the new `--min-mca` target sets
+  the pass rule for both.
+- A second resume after two crashes corrupted the checkpoint file.
+  Duplicate records are deduplicated, and results for questions no
+  longer in the dataset are dropped on resume.
+- `compare_mca_paired` raised `OverflowError` past 1074 discordant
+  pairs. P-values are now exact at any size.
+- BCa intervals counted bootstrap ties as below the estimate, biasing
+  MCA and CAR intervals downwards. Ties now count as half.
+- `export_json` with CIs took about 100 s on 14,042 questions because
+  the jackknife was O(n^2). The built-in CI functions now use a
+  closed-form jackknife (under 2 s).
+- `compare` crashed on model names containing `/` after every model had
+  run, and lost all results. Reports are now written as each model
+  finishes, under safe, unique file names, with run metadata.
+- Dry-run counted `questions x num_variants` calls, ignoring the number
+  of perturbation types.
+- Refusals, truncated responses and reasoning-only responses became
+  empty answers scored as wrong. Refusal text is now returned as the
+  answer, and truncated or reasoning-only responses raise
+  `EmptyResponseError`, recorded as failed variants.
+- Dataset loaders failed on UTF-8 files with a BOM, and malformed JSON
+  or a missing option field produced raw tracebacks. They now raise
+  `ValidationError` with the file and position.
+- Unknown providers, missing optional SDKs, and unregistered
+  perturbation types (e.g. `paraphrase`) now give clean CLI errors.
+- `core_index` could return values outside [0, 1] for custom threshold
+  grids, and `-0.0` for empty input.
 - `BatchRunner` and `StreamingRunner` now catch per-variant provider
   exceptions and continue the batch; one provider failure no longer
   tears down the whole run. Failed variants are recorded as an error
@@ -123,8 +256,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed-SDK type check stays clean.
   ([`5206d80`](https://github.com/mokhld/llm-consistency/commit/5206d80))
 
+### Security
+
+- CSV exports prefix cells that start with `=`, `+`, `-`, `@`, tab or
+  CR with a quote, to prevent formula injection. Markdown table cells
+  are escaped, so model output cannot break the table or inject HTML.
+- Provider error text stored in reports and checkpoints is truncated to
+  200 characters, with API keys and bearer tokens redacted.
+
 ### Documentation
 
+- README and CONTRIBUTING corrected: budget semantics, CI rules, config
+  file format, JSON metadata keys, custom perturbation registration and
+  `presented_options`, the custom scorer example (it read
+  `response.extracted_answer`, which is always empty),
+  `validate_sample_size` and `perturbation_impact` descriptions. Removed
+  links to a missing `AUDIT.md`.
 - README updated with checkpoint/resume, export formats, dry-run, and
   bootstrap CI sections; pointer to `CONTRIBUTING.md` and
   `examples/`.

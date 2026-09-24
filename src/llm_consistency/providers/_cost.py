@@ -51,6 +51,11 @@ MODEL_PRICING: dict[str, CostPerToken] = {
         input_per_token=15.00 / 1_000_000,
         output_per_token=75.00 / 1_000_000,
     ),
+    # Source: platform.claude.com/docs/en/about-claude/pricing, September 2026
+    "claude-haiku-4-5-20251001": CostPerToken(
+        input_per_token=1.00 / 1_000_000,
+        output_per_token=5.00 / 1_000_000,
+    ),
 }
 """Static pricing table mapping model identifiers to per-token costs.
 

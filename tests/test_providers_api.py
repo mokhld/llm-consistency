@@ -161,6 +161,7 @@ class TestProvidersDunderAll:
             "BatchResult",
             "BudgetExceededError",
             "CostPerToken",
+            "EmptyResponseError",
             "estimate_cost",
             "get_model_pricing",
             "get_provider",

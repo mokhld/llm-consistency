@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from llm_consistency.providers._base import _RawResponse
+from llm_consistency.providers._base import EmptyResponseError, _RawResponse
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,22 +29,26 @@ def _mock_response(
     input_tokens: int = 10,
     output_tokens: int = 5,
     empty_content: bool = False,
+    blocks: list[SimpleNamespace] | None = None,
+    stop_reason: str = "end_turn",
 ) -> SimpleNamespace:
     """Build a mock response matching ``client.messages.create()``.
 
     Anthropic responses differ from OpenAI:
-    - Content is ``response.content[0].text`` (not choices)
+    - Content is a list of typed blocks (not choices)
     - Tokens are ``input_tokens``/``output_tokens`` (not prompt_tokens)
     """
-    if empty_content:
-        content: list[object] = []
+    if blocks is not None:
+        content: list[SimpleNamespace] = blocks
+    elif empty_content:
+        content = []
     else:
-        content = [SimpleNamespace(text=text)]
+        content = [SimpleNamespace(type="text", text=text)]
     usage = SimpleNamespace(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
     )
-    return SimpleNamespace(content=content, usage=usage)
+    return SimpleNamespace(content=content, usage=usage, stop_reason=stop_reason)
 
 
 def _make_provider(
@@ -233,3 +237,46 @@ class TestSendRequest:
         raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.content == ""
+
+    @pytest.mark.asyncio
+    async def test_joins_text_blocks_and_skips_thinking(self) -> None:
+        """A leading thinking block used to raise AttributeError."""
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(
+                blocks=[
+                    SimpleNamespace(type="thinking", thinking="Option B fits."),
+                    SimpleNamespace(type="text", text="Answer: "),
+                    SimpleNamespace(type="text", text="B"),
+                ],
+            ),
+        )
+
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
+
+        assert raw.content == "Answer: B"
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_before_text_raises(self) -> None:
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(
+                blocks=[SimpleNamespace(type="thinking", thinking="Let me see...")],
+                stop_reason="max_tokens",
+                input_tokens=12,
+                output_tokens=1024,
+            ),
+        )
+
+        with pytest.raises(EmptyResponseError, match="max_tokens") as exc:
+            await provider._send_request("prompt")  # type: ignore[union-attr]
+        assert exc.value.prompt_tokens == 12
+        assert exc.value.completion_tokens == 1024
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_with_text_returns_text(self) -> None:
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(text="The answer is", stop_reason="max_tokens"),
+        )
+
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
+
+        assert raw.content == "The answer is"

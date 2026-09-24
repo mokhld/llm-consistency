@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from llm_consistency.providers._base import BaseLLMProvider
+from llm_consistency.providers._base import BaseLLMProvider, EmptyResponseError
 from llm_consistency.providers._batch_result import BatchResult
 from llm_consistency.providers._budget import BudgetExceededError, CostPerToken
 from llm_consistency.providers._cost import estimate_cost, get_model_pricing
@@ -75,6 +75,7 @@ __all__ = [
     "BatchResult",
     "BudgetExceededError",
     "CostPerToken",
+    "EmptyResponseError",
     "estimate_cost",
     "get_model_pricing",
     "get_provider",

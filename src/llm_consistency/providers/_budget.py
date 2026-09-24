@@ -12,7 +12,8 @@ class BudgetExceededError(LLMConsistencyError):
     """Raised when a request would exceed the configured budget ceiling.
 
     Attributes:
-        spent: Total USD already spent.
+        spent: Total USD already spent, plus the amount reserved by
+            requests still in flight.
         estimated: Estimated cost of the next request in USD.
         limit: Maximum budget ceiling in USD.
     """
@@ -67,8 +68,12 @@ class CostPerToken:
 class BudgetTracker:
     """Tracks cumulative cost and enforces a budget ceiling.
 
-    Uses ``asyncio.Lock`` for safe concurrent access during batch
-    queries. When ``max_budget_usd`` is ``None``, no ceiling is enforced.
+    Each request reserves its estimated cost before it is sent and
+    settles the reservation against the actual cost when it finishes.
+    Because the check and the reservation happen under one lock,
+    concurrent requests cannot all pass the check and then overshoot
+    the ceiling together. When ``max_budget_usd`` is ``None``, no
+    ceiling is enforced.
 
     Args:
         max_budget_usd: Maximum allowed spend in USD, or ``None``
@@ -78,32 +83,42 @@ class BudgetTracker:
     def __init__(self, max_budget_usd: float | None) -> None:
         self._max = max_budget_usd
         self._spent = 0.0
+        self._reserved = 0.0
         self._lock = asyncio.Lock()
 
-    async def check(self, estimated_cost: float) -> None:
-        """Check whether adding estimated_cost would exceed budget.
+    @property
+    def max_budget_usd(self) -> float | None:
+        """The budget ceiling in USD, or ``None`` when unlimited."""
+        return self._max
+
+    async def reserve(self, estimated_cost: float) -> None:
+        """Reserve ``estimated_cost`` if it fits within the budget.
 
         Args:
             estimated_cost: Estimated cost of the next request in USD.
 
         Raises:
-            BudgetExceededError: If ``spent + estimated_cost > max_budget_usd``.
+            BudgetExceededError: If ``spent + reserved + estimated_cost``
+                would exceed ``max_budget_usd``.
         """
         async with self._lock:
-            if self._max is not None and self._spent + estimated_cost > self._max:
-                raise BudgetExceededError(
-                    self._spent,
-                    estimated_cost,
-                    self._max,
-                )
+            committed = self._spent + self._reserved
+            if self._max is not None and committed + estimated_cost > self._max:
+                raise BudgetExceededError(committed, estimated_cost, self._max)
+            self._reserved += estimated_cost
 
-    async def record(self, actual_cost: float) -> None:
-        """Record actual cost after a completed request.
+    async def settle(self, reserved: float, actual_cost: float) -> None:
+        """Release a reservation and record what the request really cost.
+
+        Pass ``actual_cost=0.0`` to release a reservation for a request
+        that failed without being billed.
 
         Args:
-            actual_cost: Actual cost of the completed request in USD.
+            reserved: The amount previously passed to :meth:`reserve`.
+            actual_cost: Actual cost of the request in USD.
         """
         async with self._lock:
+            self._reserved -= reserved
             self._spent += actual_cost
 
     @property

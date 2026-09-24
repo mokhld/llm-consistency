@@ -11,7 +11,12 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
+from llm_consistency.providers._base import (
+    BaseLLMProvider,
+    EmptyResponseError,
+    _RawResponse,
+)
+from llm_consistency.providers._retry import is_retryable_status, parse_retry_after
 
 
 class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
@@ -35,15 +40,34 @@ class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
         super().__init__(model=model, **kwargs)  # type: ignore[arg-type]
         try:
             import litellm  # noqa: PLC0415
+
+            # litellm depends on openai. Every LiteLLM exception subclasses
+            # openai.APIError and carries the HTTP status it maps to.
+            from openai import APIConnectionError, APIError  # noqa: PLC0415
         except ImportError:
             msg = "Install llm-consistency[litellm] to use the LiteLLM provider"
             raise ImportError(msg) from None
         self._litellm: Any = litellm
+        self._connection_error = APIConnectionError
+        self._api_error = APIError
 
     @property
     def provider_name(self) -> str:
         """Return ``'litellm'``."""
         return "litellm"
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        """Retry connection errors, timeouts and 408/409/429/5xx statuses."""
+        if isinstance(exc, self._connection_error):  # includes litellm.Timeout
+            return True
+        if isinstance(exc, self._api_error):
+            return is_retryable_status(getattr(exc, "status_code", None))
+        return super()._is_retryable(exc)
+
+    def _retry_after(self, exc: Exception) -> float | None:
+        """Read ``retry-after`` from the upstream headers LiteLLM keeps."""
+        requested = parse_retry_after(getattr(exc, "litellm_response_headers", None))
+        return requested if requested is not None else super()._retry_after(exc)
 
     async def _send_request(
         self,
@@ -55,7 +79,12 @@ class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
 
         LiteLLM returns OpenAI-compatible responses with
         ``response.choices[0].message.content`` and
-        ``response.usage`` attributes.
+        ``response.usage`` attributes.  A refusal is returned as the
+        content.
+
+        Raises:
+            EmptyResponseError: If the output token limit was reached
+                before any text was produced.
         """
         messages: list[dict[str, str]] = []
         if system:
@@ -69,10 +98,24 @@ class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
         )
         latency_ms = (time.monotonic() - t0) * 1000
 
-        content: str = response.choices[0].message.content or ""
+        choice = response.choices[0]
         usage = response.usage
         prompt_tokens: int | None = usage.prompt_tokens if usage else None
         completion_tokens: int | None = usage.completion_tokens if usage else None
+
+        # LiteLLM passes an OpenAI refusal through provider_specific_fields.
+        extra = choice.message.provider_specific_fields or {}
+        content: str = choice.message.content or extra.get("refusal") or ""
+        if not content and choice.finish_reason == "length":
+            msg = (
+                f"LiteLLM model {self._model!r} reached the output token limit "
+                f"before producing any text"
+            )
+            raise EmptyResponseError(
+                msg,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
 
         return _RawResponse(
             content=content,

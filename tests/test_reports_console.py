@@ -12,6 +12,7 @@ from llm_consistency.types import (
     EvaluationReport,
     PerturbationType,
     QuestionConsistencyResult,
+    ScoredResponse,
 )
 
 
@@ -145,3 +146,112 @@ def test_console_reporter_with_string_io() -> None:
     assert len(output) > 0
     assert "CORE" in output
     assert "MCA" in output
+
+
+def _report_with(
+    rc_corrects: list[float],
+    *,
+    mca_threshold: float = 1.0,
+    min_mca: float = 1.0,
+    core_threshold: float | None = None,
+    errored_variants: int = 0,
+) -> EvaluationReport:
+    """Build a report with one QCR per rc_correct value.
+
+    The first ``errored_variants`` scored responses of the first question
+    are marked as provider errors (``scoring_method`` starting "error:").
+    """
+    results = []
+    for i, rc in enumerate(rc_corrects):
+        scored = tuple(
+            ScoredResponse(
+                question_id=f"q{i}",
+                is_correct=False,
+                score=0.0,
+                scoring_method="error:RuntimeError"
+                if i == 0 and v < errored_variants
+                else "exact_match",
+            )
+            for v in range(2)
+        )
+        results.append(
+            QuestionConsistencyResult(
+                question_id=f"q{i}",
+                rc_correct=rc,
+                rc_agree=1.0,
+                total_variants=2,
+                correct_count=round(2 * rc),
+                answer_distribution={"A": 2},
+                scored_responses=scored,
+            )
+        )
+    config = EvaluationConfig(
+        model="mock",
+        provider="mock",
+        perturbation_types=(PerturbationType.OPTION_REORDER,),
+        scorer="exact_match",
+        mca_threshold=mca_threshold,
+        min_mca=min_mca,
+        core_threshold=core_threshold,
+    )
+    return EvaluationReport(
+        config=config,
+        results=tuple(results),
+        total_questions=len(results),
+        total_variants=2 * len(results),
+        mean_rc_correct=sum(rc_corrects) / len(rc_corrects),
+        mean_rc_agree=1.0,
+    )
+
+
+def _row(report: EvaluationReport, metric: str, **kwargs: float) -> str:
+    """Render *report* and return the summary-table line for *metric*."""
+    buf = StringIO()
+    _get_console_reporter()(console=Console(file=buf, width=120)).display(
+        report, **kwargs
+    )
+    lines = [line for line in buf.getvalue().splitlines() if metric in line]
+    assert lines, f"no {metric!r} row in output"
+    return lines[0]
+
+
+def test_core_status_is_na_without_core_threshold() -> None:
+    assert "n/a" in _row(_report_with([1.0]), "CORE")
+
+
+def test_core_status_uses_core_threshold_when_set() -> None:
+    assert "FAIL" in _row(_report_with([0.0], core_threshold=0.5), "CORE")
+    assert "PASS" in _row(_report_with([1.0], core_threshold=0.5), "CORE")
+
+
+def test_mca_status_uses_min_mca_like_the_ci_gate() -> None:
+    """9 of 10 questions pass at c=0.8: MCA is 0.9."""
+    ci = importlib.import_module("llm_consistency.runners._ci")
+    rcs = [1.0] * 9 + [0.5]
+
+    strict = _report_with(rcs, mca_threshold=0.8)
+    assert "FAIL" in _row(strict, "MCA(0.80)")
+    assert any("MCA check failed" in f for f in ci.gate_failures(strict))
+
+    lenient = _report_with(rcs, mca_threshold=0.8, min_mca=0.9)
+    assert "PASS" in _row(lenient, "MCA(0.80)")
+    assert ci.gate_failures(lenient) == ()
+
+
+def test_threshold_override_of_zero_is_honoured() -> None:
+    report = _report_with([0.0], mca_threshold=1.0, min_mca=1.0)
+    line = _row(report, "MCA(", threshold=0.0)
+    assert "MCA(0.00)" in line
+    assert "1.0000" in line
+    assert "PASS" in line
+
+
+def test_failed_variants_row_only_when_errors() -> None:
+    buf = StringIO()
+    reporter = _get_console_reporter()(console=Console(file=buf, width=120))
+    reporter.display(_report_with([1.0, 1.0]))
+    assert "Failed variants" not in buf.getvalue()
+
+    line = _row(_report_with([0.0, 1.0], errored_variants=1), "Failed variants")
+    assert "1 / 4" in line
+    assert "FAIL" in line

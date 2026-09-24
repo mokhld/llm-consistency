@@ -407,3 +407,97 @@ class TestValidation:
             fp = tmp_path / f"data{ext}"
             fp.write_text("")
             assert detect_format(fp) == expected
+
+
+# ===========================================================================
+# Encoding and malformed input
+# ===========================================================================
+
+
+class TestByteOrderMark:
+    """Files saved with a UTF-8 BOM (Excel's default) load normally."""
+
+    def test_mc_csv_with_bom(self, tmp_path: Path) -> None:
+        fp = tmp_path / "mc.csv"
+        with fp.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "stem", "option_a", "option_b", "correct"])
+            writer.writerow(["q1", "Capital of France?", "London", "Paris", "B"])
+
+        ds = MCDataset.load(fp)
+        assert ds.questions[0].id == "q1"
+
+    def test_oe_csv_with_bom(self, tmp_path: Path) -> None:
+        fp = tmp_path / "oe.csv"
+        with fp.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "stem", "reference_answers"])
+            writer.writerow(["oe1", "Capital of France?", "Paris"])
+
+        ds = OpenEndedDataset.load(fp)
+        assert ds.questions[0].id == "oe1"
+
+    def test_json_and_jsonl_with_bom(self, tmp_path: Path) -> None:
+        fp_json = tmp_path / "mc.json"
+        fp_json.write_text(
+            json.dumps({"questions": [_mc_question_dict()]}), encoding="utf-8-sig"
+        )
+        fp_jsonl = tmp_path / "oe.jsonl"
+        fp_jsonl.write_text(json.dumps(_oe_question_dict()), encoding="utf-8-sig")
+
+        assert MCDataset.load(fp_json).questions[0].id == "q1"
+        assert OpenEndedDataset.load(fp_jsonl).questions[0].id == "oe1"
+
+
+class TestMalformedInput:
+    """Bad files raise ValidationError that says where the problem is."""
+
+    @pytest.mark.parametrize("loader", [MCDataset, OpenEndedDataset])
+    def test_malformed_json_names_file_and_position(
+        self, tmp_path: Path, loader: type[MCDataset | OpenEndedDataset]
+    ) -> None:
+        fp = tmp_path / "bad.json"
+        fp.write_text('{"questions": [\n  {"id": "q1",,}\n]}')
+
+        with pytest.raises(ValidationError, match=r"bad\.json at line 2, column"):
+            loader.load(fp)
+
+    @pytest.mark.parametrize("payload", ['[{"id": "q1"}]', '{"items": []}'])
+    def test_json_without_questions_list(self, tmp_path: Path, payload: str) -> None:
+        fp = tmp_path / "mc.json"
+        fp.write_text(payload)
+
+        with pytest.raises(ValidationError, match="'questions' list"):
+            MCDataset.load(fp)
+
+    def test_malformed_jsonl_names_file_and_line(self, tmp_path: Path) -> None:
+        fp = tmp_path / "bad.jsonl"
+        fp.write_text(json.dumps(_mc_question_dict("q1")) + "\n{not json}\n")
+
+        with pytest.raises(ValidationError, match=r"line 2 in .*bad\.jsonl"):
+            MCDataset.load(fp)
+
+    def test_missing_option_field_names_question_and_option(
+        self, tmp_path: Path
+    ) -> None:
+        question = _mc_question_dict("q2")
+        question["options"] = [
+            {"label": "A", "text": "London", "is_correct": False},
+            {"label": "B", "is_correct": True},
+        ]
+        fp = tmp_path / "mc.json"
+        fp.write_text(json.dumps({"questions": [_mc_question_dict("q1"), question]}))
+
+        with pytest.raises(
+            ValidationError, match=r"'text' in option 1 at index 1 in .*mc\.json"
+        ):
+            MCDataset.load(fp)
+
+    def test_option_that_is_not_an_object(self, tmp_path: Path) -> None:
+        question = _mc_question_dict("q1")
+        question["options"] = ["London", "Paris"]
+        fp = tmp_path / "mc.json"
+        fp.write_text(json.dumps({"questions": [question]}))
+
+        with pytest.raises(ValidationError, match="option 0 at index 0"):
+            MCDataset.load(fp)

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from llm_consistency._exceptions import ValidationError
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 from llm_consistency.providers._budget import BudgetExceededError, CostPerToken
 from llm_consistency.providers._cost import (
@@ -47,9 +48,16 @@ class TestModelPricing:
             "claude-3-5-sonnet-20241022",
             "claude-3-5-haiku-20241022",
             "claude-opus-4-20250514",
+            "claude-haiku-4-5-20251001",
         ]
         for model in expected:
             assert model in MODEL_PRICING, f"{model} missing from MODEL_PRICING"
+
+    def test_claude_haiku_4_5_price(self) -> None:
+        """$1 / $5 per million tokens (Anthropic pricing page)."""
+        pricing = MODEL_PRICING["claude-haiku-4-5-20251001"]
+        assert pricing.input_per_token == pytest.approx(1.00 / 1_000_000)
+        assert pricing.output_per_token == pytest.approx(5.00 / 1_000_000)
 
 
 # ---------------------------------------------------------------------------
@@ -156,38 +164,60 @@ class TestBaseLLMProviderCostIntegration:
         )
         with patch.object(
             provider._budget,
-            "record",
+            "settle",
             new_callable=AsyncMock,
-        ) as mock_record:
+        ) as mock_settle:
             await provider.query("test prompt", question_id="q1")
-            mock_record.assert_called_once()
-            actual_cost = mock_record.call_args.kwargs["actual_cost"]
+            mock_settle.assert_called_once()
+            actual_cost = mock_settle.call_args.kwargs["actual_cost"]
             assert actual_cost > 0.0, f"Expected positive cost, got {actual_cost}"
 
     @pytest.mark.asyncio
     async def test_query_records_zero_cost_for_unknown_model(
         self,
     ) -> None:
-        """query() records actual_cost=0.0 for unknown model."""
+        """query() records actual_cost=0.0 for unknown model without budget."""
+        provider = _CostTestProvider(model="unknown-model-xyz")
+        with patch.object(
+            provider._budget,
+            "settle",
+            new_callable=AsyncMock,
+        ) as mock_settle:
+            await provider.query("test prompt", question_id="q1")
+            mock_settle.assert_called_once()
+            actual_cost = mock_settle.call_args.kwargs["actual_cost"]
+            assert actual_cost == 0.0, f"Expected 0.0, got {actual_cost}"
+
+    def test_budget_for_unknown_model_raises(self) -> None:
+        """A budget cannot be enforced without a price, so refuse to start."""
+        with pytest.raises(ValidationError, match="unknown-model-xyz"):
+            _CostTestProvider(model="unknown-model-xyz", max_budget_usd=10.0)
+
+    @pytest.mark.asyncio
+    async def test_pricing_override_prices_unknown_model(self) -> None:
         provider = _CostTestProvider(
             model="unknown-model-xyz",
             max_budget_usd=10.0,
+            pricing=CostPerToken(input_per_token=1e-6, output_per_token=2e-6),
         )
-        with patch.object(
-            provider._budget,
-            "record",
-            new_callable=AsyncMock,
-        ) as mock_record:
-            await provider.query("test prompt", question_id="q1")
-            mock_record.assert_called_once()
-            actual_cost = mock_record.call_args.kwargs["actual_cost"]
-            assert actual_cost == 0.0, f"Expected 0.0, got {actual_cost}"
+        await provider.query("test prompt", question_id="q1")
+        # 200 * 1e-6 + 50 * 2e-6
+        assert provider._budget.spent == pytest.approx(300e-6)
 
     @pytest.mark.asyncio
-    async def test_query_records_zero_cost_when_tokens_none(
+    async def test_pricing_override_beats_table(self) -> None:
+        provider = _CostTestProvider(
+            model="gpt-4o",
+            pricing=CostPerToken(input_per_token=0.0, output_per_token=0.0),
+        )
+        await provider.query("test prompt", question_id="q1")
+        assert provider._budget.spent == 0.0
+
+    @pytest.mark.asyncio
+    async def test_query_charges_estimate_when_tokens_none(
         self,
     ) -> None:
-        """query() records actual_cost=0.0 when tokens are None."""
+        """Unreported usage is charged the pre-request estimate, not 0.0."""
         provider = _CostTestProvider(
             model="gpt-4o",
             prompt_tokens=None,
@@ -196,13 +226,14 @@ class TestBaseLLMProviderCostIntegration:
         )
         with patch.object(
             provider._budget,
-            "record",
+            "settle",
             new_callable=AsyncMock,
-        ) as mock_record:
+        ) as mock_settle:
             await provider.query("test prompt", question_id="q1")
-            mock_record.assert_called_once()
-            actual_cost = mock_record.call_args.kwargs["actual_cost"]
-            assert actual_cost == 0.0, f"Expected 0.0 (None tokens), got {actual_cost}"
+            mock_settle.assert_called_once()
+            actual_cost = mock_settle.call_args.kwargs["actual_cost"]
+            # gpt-4o: 200 * 2.50/1M + 50 * 10.00/1M
+            assert actual_cost == pytest.approx(0.001)
 
     @pytest.mark.asyncio
     async def test_budget_exceeded_with_known_model_pricing(

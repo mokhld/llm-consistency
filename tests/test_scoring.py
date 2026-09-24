@@ -11,6 +11,7 @@ from llm_consistency.scoring import (
     BaseScorer,
     CustomScorerAdapter,
     ExactMatchScorer,
+    _extract_mc_answer,
     get_scorer,
 )
 from llm_consistency.types import LLMResponse, MCOption, MCQuestion, ScoredResponse
@@ -328,6 +329,78 @@ class TestExactMatchScorerQuestionId:
         scorer = ExactMatchScorer()
         result = scorer.score(response, question)
         assert result.question_id == "q2"
+
+
+# ---------------------------------------------------------------------------
+# _extract_mc_answer edge cases (review item A4)
+# ---------------------------------------------------------------------------
+
+_ABCD = frozenset("ABCD")
+
+
+class TestExtractMcAnswer:
+    """Word boundaries, case, negation and articles in answer extraction."""
+
+    @pytest.mark.parametrize(
+        ("raw_output", "expected"),
+        [
+            # A label must end at a word boundary: not the "D" of "Definitely".
+            ("Answer: Definitely C", "C"),
+            ("The answer is clearly B.", "B"),
+            # A sentence-initial article "A" is not a label.
+            ("A good choice here is C.", "C"),
+            # A negated label is skipped.
+            ("The answer is not A, it is C.", "C"),
+            ("It isn't A, so B.", "B"),
+            ("Not A.", None),
+            # "Answer: X" and "The answer is X": the last statement wins.
+            ("Answer: A. On reflection, Answer: C", "C"),
+            ("The answer is B... no wait, the answer is D", "D"),
+            # The last statement wins across both phrasings.
+            ("Answer: C\n\nWait, actually the answer is B.", "B"),
+            ("The answer is (B). Answer: D", "D"),
+            # A sentence-initial "A" before "is" names the option.
+            ("A is correct.", "A"),
+            ("Option A is correct", "A"),
+            # With nothing else to read, the article-like "A" is used.
+            ("A good one, I would say.", "A"),
+            # Labels are case-sensitive inside longer text...
+            ("Answer: b", None),
+            ("the answer is c", None),
+            # ...but a lone character matches in either case.
+            ("c", "C"),
+            ("B\n\nA is wrong because it is too small.", "B"),
+        ],
+    )
+    def test_extraction(self, raw_output: str, expected: str | None) -> None:
+        assert _extract_mc_answer(raw_output, _ABCD) == expected
+
+    @pytest.mark.parametrize(
+        ("raw_output", "expected"),
+        [
+            ("2", "2"),
+            ("Answer: 3", "3"),
+            ("The answer is (4).", "4"),
+            ("Option 1 is correct", "1"),
+        ],
+    )
+    def test_numeric_labels(self, raw_output: str, expected: str) -> None:
+        assert _extract_mc_answer(raw_output, frozenset("1234")) == expected
+
+    def test_multi_digit_label_preferred_over_prefix(self) -> None:
+        labels = frozenset(str(i) for i in range(1, 11))
+        assert _extract_mc_answer("Answer: 10", labels) == "10"
+        assert _extract_mc_answer("Answer: 1", labels) == "1"
+
+    def test_pronoun_i_is_not_a_label(self) -> None:
+        """With 10 options "I" is a label, but "I think" is the pronoun."""
+        labels = frozenset("ABCDEFGHIJ")
+        assert _extract_mc_answer("I think B fits best.", labels) == "B"
+        assert _extract_mc_answer("I is the answer.", labels) == "I"
+
+    def test_lowercase_labels_returned_as_spelled(self) -> None:
+        assert _extract_mc_answer("Answer: b", frozenset("abcd")) == "b"
+        assert _extract_mc_answer("B", frozenset("abcd")) == "b"
 
 
 # ---------------------------------------------------------------------------

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import itertools
+import math
 import random
 import string
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from llm_consistency.types import MCOption, PerturbationType, PerturbedVariant
+from llm_consistency.types import (
+    MCOption,
+    PerturbationType,
+    PerturbedVariant,
+    PresentedOption,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from llm_consistency.types import MCQuestion
 
@@ -56,9 +62,47 @@ class BasePerturbation(ABC):
         ...
 
 
+def _present(
+    options: Sequence[MCOption], labels: Sequence[str]
+) -> tuple[PresentedOption, ...]:
+    """Pair each option with the label it is shown under in the prompt."""
+    return tuple(
+        PresentedOption(
+            label=label,
+            text=o.text,
+            is_correct=o.is_correct,
+            original_label=o.label,
+        )
+        for label, o in zip(labels, options, strict=True)
+    )
+
+
 # ---------------------------------------------------------------------------
 # OptionReorderPerturbation
 # ---------------------------------------------------------------------------
+
+# Up to 7 options (5040 orderings) every permutation is enumerated before
+# sampling, which keeps the historical output.  Beyond that the permutations
+# are drawn directly, because 10 options already have 3.6M orderings.
+_MAX_ENUMERATED_ORDERINGS = math.factorial(7)
+
+
+def _sample_permutations(size: int, k: int, seed: int) -> list[tuple[int, ...]]:
+    """Draw *k* distinct non-identity permutations of ``range(size)``.
+
+    Each draw is a seeded shuffle; the identity and repeats are rejected.
+    The caller guarantees ``k`` is below the number of such permutations.
+    """
+    rng = random.Random(seed)
+    identity = tuple(range(size))
+    order = list(identity)
+    selected: dict[tuple[int, ...], None] = {}
+    while len(selected) < k:
+        rng.shuffle(order)
+        perm = tuple(order)
+        if perm != identity:
+            selected[perm] = None
+    return list(selected)
 
 
 class OptionReorderPerturbation(BasePerturbation):
@@ -66,13 +110,15 @@ class OptionReorderPerturbation(BasePerturbation):
 
     Produces all non-identity permutations of the option list.  Labels
     are reassigned to match position (A=first, B=second, ...) while
-    ``is_correct`` follows the text content.
+    ``is_correct`` follows the text content.  ``presented_options``
+    records the original label of each reordered option.
 
     When *n* is specified and smaller than the total number of
     non-identity permutations, a deterministic sample of size *n* is
     drawn using ``random.Random(seed)``.  If *n* is ``None`` or
     exceeds the available count, all non-identity permutations are
-    returned.
+    returned.  For more than 7 options the sample is drawn without
+    enumerating every permutation.
     """
 
     @property
@@ -101,26 +147,23 @@ class OptionReorderPerturbation(BasePerturbation):
         num_options = len(question.options)
         labels = string.ascii_uppercase[:num_options]
         identity = tuple(range(num_options))
+        available = math.factorial(num_options) - 1
+        few_orderings = available + 1 <= _MAX_ENUMERATED_ORDERINGS
 
-        # All permutations minus the identity
-        all_perms = [p for p in itertools.permutations(identity) if p != identity]
-
-        # N-sampling
-        if n is not None and n < len(all_perms):
-            selected = random.Random(seed).sample(all_perms, k=n)
+        selected: Sequence[tuple[int, ...]]
+        if n is None or n >= available or few_orderings:
+            # All permutations minus the identity
+            all_perms = [p for p in itertools.permutations(identity) if p != identity]
+            if n is not None and n < len(all_perms):
+                selected = random.Random(seed).sample(all_perms, k=n)
+            else:
+                selected = all_perms
         else:
-            selected = all_perms
+            selected = _sample_permutations(num_options, n, seed)
 
         variants: list[PerturbedVariant] = []
         for idx, perm in enumerate(selected):
-            new_options = tuple(
-                MCOption(
-                    label=labels[new_pos],
-                    text=question.options[orig_idx].text,
-                    is_correct=question.options[orig_idx].is_correct,
-                )
-                for new_pos, orig_idx in enumerate(perm)
-            )
+            presented = _present([question.options[i] for i in perm], labels)
             variants.append(
                 PerturbedVariant(
                     original_question_id=question.id,
@@ -128,7 +171,11 @@ class OptionReorderPerturbation(BasePerturbation):
                     seed=seed,
                     variant_index=idx,
                     stem=question.stem,
-                    options=new_options,
+                    options=tuple(
+                        MCOption(label=o.label, text=o.text, is_correct=o.is_correct)
+                        for o in presented
+                    ),
+                    presented_options=presented,
                 )
             )
 
@@ -204,7 +251,9 @@ class FormatChangePerturbation(BasePerturbation):
     Produces one variant per template from :data:`_TEMPLATES` (minimum 6).
     Each template renders the full question (stem + options) into the
     variant's ``stem`` field, with ``options=None`` because the options
-    have been rendered into a presentation string.
+    have been rendered into a presentation string.  ``presented_options``
+    records the labels each template shows: ``1``..``n`` for the numbered
+    template, the original labels otherwise.
 
     When *n* is specified and smaller than the total number of templates,
     a deterministic sample of size *n* is drawn using ``random.Random(seed)``.
@@ -234,15 +283,15 @@ class FormatChangePerturbation(BasePerturbation):
         Returns:
             A tuple of ``PerturbedVariant`` instances.
         """
-        all_rendered = [tmpl(question.stem, question.options) for tmpl in _TEMPLATES]
+        lettered = _present(question.options, [o.label for o in question.options])
+        numbered = _present(
+            question.options, [str(i + 1) for i in range(len(question.options))]
+        )
 
         # N-sampling
-        if n is not None and n < len(all_rendered):
-            indices = list(range(len(all_rendered)))
-            selected_indices = random.Random(seed).sample(indices, k=n)
-            selected = [all_rendered[i] for i in selected_indices]
-        else:
-            selected = all_rendered
+        indices = list(range(len(_TEMPLATES)))
+        if n is not None and n < len(indices):
+            indices = random.Random(seed).sample(indices, k=n)
 
         return tuple(
             PerturbedVariant(
@@ -250,10 +299,13 @@ class FormatChangePerturbation(BasePerturbation):
                 perturbation_type=PerturbationType.FORMAT_CHANGE,
                 seed=seed,
                 variant_index=idx,
-                stem=rendered,
+                stem=_TEMPLATES[t](question.stem, question.options),
                 options=None,
+                presented_options=(
+                    numbered if _TEMPLATES[t] is _fmt_numbered else lettered
+                ),
             )
-            for idx, rendered in enumerate(selected)
+            for idx, t in enumerate(indices)
         )
 
 
@@ -286,7 +338,8 @@ class SeparatorChangePerturbation(BasePerturbation):
     :data:`_SEPARATORS` (minimum 8).
 
     Each variant renders the full question (stem + separated options) into
-    the variant's ``stem`` field, with ``options=None``.
+    the variant's ``stem`` field, with ``options=None``.  ``presented_options``
+    holds the original options, since their labels are unchanged.
 
     When *n* is specified and smaller than the total number of separators,
     a deterministic sample of size *n* is drawn using ``random.Random(seed)``.
@@ -329,6 +382,7 @@ class SeparatorChangePerturbation(BasePerturbation):
         else:
             selected = all_rendered
 
+        presented = _present(question.options, [o.label for o in question.options])
         return tuple(
             PerturbedVariant(
                 original_question_id=question.id,
@@ -337,6 +391,7 @@ class SeparatorChangePerturbation(BasePerturbation):
                 variant_index=idx,
                 stem=rendered,
                 options=None,
+                presented_options=presented,
             )
             for idx, rendered in enumerate(selected)
         )

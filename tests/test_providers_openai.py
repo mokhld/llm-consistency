@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from llm_consistency.providers._base import _RawResponse
+from llm_consistency.providers._base import EmptyResponseError, _RawResponse
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,10 +28,12 @@ def _mock_response(
     content: str | None = "Answer: B",
     prompt_tokens: int | None = 10,
     completion_tokens: int | None = 5,
+    refusal: str | None = None,
+    finish_reason: str = "stop",
 ) -> SimpleNamespace:
     """Build a mock response matching ``client.chat.completions.create()``."""
-    message = SimpleNamespace(content=content)
-    choice = SimpleNamespace(message=message)
+    message = SimpleNamespace(content=content, refusal=refusal)
+    choice = SimpleNamespace(message=message, finish_reason=finish_reason)
     if prompt_tokens is not None or completion_tokens is not None:
         usage = SimpleNamespace(
             prompt_tokens=prompt_tokens,
@@ -195,3 +197,39 @@ class TestSendRequest:
         raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.content == ""
+
+    @pytest.mark.asyncio
+    async def test_refusal_returned_as_content(self) -> None:
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(content=None, refusal="I can't help with that."),
+        )
+
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
+
+        assert raw.content == "I can't help with that."
+
+    @pytest.mark.asyncio
+    async def test_truncated_before_text_raises(self) -> None:
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(
+                content="",
+                finish_reason="length",
+                prompt_tokens=12,
+                completion_tokens=256,
+            ),
+        )
+
+        with pytest.raises(EmptyResponseError, match="output token limit") as exc:
+            await provider._send_request("prompt")  # type: ignore[union-attr]
+        assert exc.value.prompt_tokens == 12
+        assert exc.value.completion_tokens == 256
+
+    @pytest.mark.asyncio
+    async def test_truncated_with_text_returns_text(self) -> None:
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(content="The answer is", finish_reason="length"),
+        )
+
+        raw = await provider._send_request("prompt")  # type: ignore[union-attr]
+
+        assert raw.content == "The answer is"

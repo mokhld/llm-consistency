@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from llm_consistency.providers._base import _RawResponse
+from llm_consistency.providers._base import EmptyResponseError, _RawResponse
 
 
 def _import_ollama_provider() -> type:
@@ -45,6 +45,9 @@ def _make_mock_ollama_module(
 
     mock_async_client_cls = MagicMock(return_value=mock_client)
     mock_module.AsyncClient = mock_async_client_cls  # type: ignore[attr-defined]
+    mock_module.ResponseError = type(  # type: ignore[attr-defined]
+        "ResponseError", (Exception,), {}
+    )
 
     return mock_module, mock_client
 
@@ -217,3 +220,31 @@ class TestOllamaSendRequest:
             await provider._send_request("prompt")
             call_kwargs = mock_client.chat.call_args
             assert call_kwargs.kwargs["model"] == "codellama:7b"
+
+    @pytest.mark.asyncio
+    async def test_thinking_without_content_raises(self) -> None:
+        chat_response = {
+            "message": {"content": "", "thinking": "Option B looks right."},
+            "prompt_eval_count": 12,
+            "eval_count": 300,
+        }
+        mock_module, _ = _make_mock_ollama_module(chat_response=chat_response)
+        with patch.dict(sys.modules, {"ollama": mock_module}):
+            cls = _import_ollama_provider()
+            provider = cls(model="qwen3")
+            with pytest.raises(EmptyResponseError, match="thinking") as exc:
+                await provider._send_request("prompt")
+            assert exc.value.prompt_tokens == 12
+            assert exc.value.completion_tokens == 300
+
+    @pytest.mark.asyncio
+    async def test_thinking_with_content_returns_content(self) -> None:
+        chat_response = {
+            "message": {"content": "B", "thinking": "Option B looks right."},
+        }
+        mock_module, _ = _make_mock_ollama_module(chat_response=chat_response)
+        with patch.dict(sys.modules, {"ollama": mock_module}):
+            cls = _import_ollama_provider()
+            provider = cls(model="qwen3")
+            raw = await provider._send_request("prompt")
+            assert raw.content == "B"

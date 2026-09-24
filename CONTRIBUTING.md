@@ -1,8 +1,8 @@
 # Contributing to llm-consistency
 
 Thanks for your interest. This document covers everything you need to
-land a change: local setup, quality gates, extension points, and the
-project's audit-driven roadmap.
+land a change: local setup, quality gates, commit conventions, and
+extension points.
 
 ## Local setup
 
@@ -31,7 +31,7 @@ provider code, install the relevant extras.
 Every change must pass all four before merging:
 
 ```bash
-uv run pytest                          # 591 tests, >= 95% coverage
+uv run pytest                          # >= 95% coverage
 uv run mypy --strict src/llm_consistency/
 uv run ruff check src/ tests/ examples/
 uv run ruff format --check src/ tests/ examples/
@@ -72,9 +72,7 @@ Conventional Commits prefix every subject line:
 | `perf:` | Performance work |
 
 Keep the subject line under ~70 chars. Detailed rationale goes in the
-body. When a commit closes an `AUDIT.md` finding, mention the finding
-ID (e.g. `R1`, `C3`) in the body so the audit's "what's been done"
-section can be updated.
+body.
 
 ## Extension points
 
@@ -97,20 +95,32 @@ from llm_consistency import (
 class MyPerturbation(BasePerturbation):
     @property
     def perturbation_type(self) -> PerturbationType:
-        return PerturbationType.FORMAT_CHANGE  # reuse or extend the enum
+        return PerturbationType.FORMAT_CHANGE
 
     def generate_variants(
         self, question: MCQuestion, *, seed: int = 0, n: int | None = None,
     ) -> tuple[PerturbedVariant, ...]:
         ...
 
-register_perturbation("my_perturbation", MyPerturbation())
+# Replaces the built-in format_change generator in this process.
+register_perturbation("format_change", MyPerturbation(), force=True)
 ```
+
+The runners look generators up by `PerturbationType` value
+(`runners/_pipeline.py`), so a generator is only used when it is
+registered under one of the values the runners know, as above. A
+generator registered under a new name appears in
+`list_registered_perturbations()` but cannot be selected for a run
+yet. Making custom names selectable is on the backlog.
 
 Constraints:
 - Variants must be deterministic given `(question, seed, n)`.
 - The variant's `is_correct` must follow the option *text*, not its
   label position.
+- Set `presented_options` on every variant (`PresentedOption` with the
+  label shown to the model and the option's `original_label`). Scoring
+  and agreement use it; without it the runner assumes labels are
+  unchanged and warns.
 - Tests must cover at least: identity not in output, requested `n`
   honoured, determinism across two calls with the same seed.
 

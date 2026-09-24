@@ -46,6 +46,7 @@ from llm_consistency.providers import (
     BaseLLMProvider,
     BatchResult,
     BudgetExceededError,
+    EmptyResponseError,
     estimate_cost,
     get_provider,
 )
@@ -81,6 +82,7 @@ from llm_consistency.types import (
     PairedTestResult,
     PerturbationType,
     PerturbedVariant,
+    PresentedOption,
     QuestionConsistencyResult,
     ScoredResponse,
 )
@@ -98,6 +100,7 @@ __all__ = [
     "ConsoleReporter",
     "CustomDataset",
     "CustomScorerAdapter",
+    "EmptyResponseError",
     "EvaluationConfig",
     "EvaluationReport",
     "ExactMatchScorer",
@@ -114,6 +117,7 @@ __all__ = [
     "PairedTestResult",
     "PerturbationType",
     "PerturbedVariant",
+    "PresentedOption",
     "QuestionConsistencyResult",
     "RunMetadata",
     "ScoredResponse",

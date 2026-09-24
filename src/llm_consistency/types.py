@@ -73,6 +73,44 @@ class MCOption:
 
 
 @dataclass(frozen=True)
+class PresentedOption(MCOption):
+    """An option as it was shown to the model in one perturbed variant.
+
+    ``label`` is the label printed in the prompt, for example ``"C"`` after
+    a reorder or ``"3"`` in the numbered layout.  ``original_label`` is the
+    label of the same option in the source question, so it identifies the
+    option's content across variants.
+
+    Attributes:
+        original_label: Label of this option in the original question.
+    """
+
+    original_label: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-compatible dictionary."""
+        return {**super().to_dict(), "original_label": self.original_label}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PresentedOption:
+        """Deserialize from a dictionary.
+
+        Args:
+            data: Dictionary with 'label', 'text', 'is_correct' and
+                'original_label' keys.
+
+        Returns:
+            A new PresentedOption instance.
+        """
+        return cls(
+            label=str(data["label"]),
+            text=str(data["text"]),
+            is_correct=bool(data["is_correct"]),
+            original_label=str(data["original_label"]),
+        )
+
+
+@dataclass(frozen=True)
 class MCQuestion:
     """A multiple-choice question with exactly one correct answer.
 
@@ -199,6 +237,10 @@ class PerturbedVariant:
         stem: The perturbed question text.
         options: Tuple of MCOption instances for MC variants, None for
             open-ended variants.
+        presented_options: The options in the order and with the labels
+            the model sees in the rendered prompt, each carrying its
+            label in the original question.  Responses are scored against
+            these.  ``None`` when the perturbation does not declare them.
     """
 
     original_question_id: str
@@ -207,6 +249,7 @@ class PerturbedVariant:
     variant_index: int
     stem: str
     options: tuple[MCOption, ...] | None = None
+    presented_options: tuple[PresentedOption, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dictionary.
@@ -222,6 +265,11 @@ class PerturbedVariant:
             "options": (
                 [o.to_dict() for o in self.options]
                 if self.options is not None
+                else None
+            ),
+            "presented_options": (
+                [o.to_dict() for o in self.presented_options]
+                if self.presented_options is not None
                 else None
             ),
         }
@@ -243,6 +291,12 @@ class PerturbedVariant:
             if raw_options is not None
             else None
         )
+        raw_presented = data.get("presented_options")
+        presented: tuple[PresentedOption, ...] | None = (
+            tuple(PresentedOption.from_dict(o) for o in raw_presented)
+            if raw_presented is not None
+            else None
+        )
         return cls(
             original_question_id=str(data["original_question_id"]),
             perturbation_type=PerturbationType[data["perturbation_type"]],
@@ -250,6 +304,7 @@ class PerturbedVariant:
             variant_index=int(data["variant_index"]),
             stem=str(data["stem"]),
             options=options,
+            presented_options=presented,
         )
 
 
@@ -525,6 +580,27 @@ class QuestionConsistencyResult:
     answer_distribution: dict[str, int] = field(default_factory=dict, hash=False)
     scored_responses: tuple[ScoredResponse, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Validate construction-time invariants."""
+        if self.total_variants < 1:
+            msg = "QuestionConsistencyResult.total_variants must be >= 1"
+            raise ValidationError(msg)
+        if not 0 <= self.correct_count <= self.total_variants:
+            msg = (
+                f"QuestionConsistencyResult.correct_count ({self.correct_count}) "
+                f"must be between 0 and total_variants ({self.total_variants})"
+            )
+            raise ValidationError(msg)
+        # The chained comparison is False for NaN, so NaN is rejected too.
+        for name in ("rc_correct", "rc_agree"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                msg = (
+                    f"QuestionConsistencyResult.{name} must be in "
+                    f"[0.0, 1.0], got {value}"
+                )
+                raise ValidationError(msg)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dictionary.
 
@@ -566,9 +642,7 @@ class QuestionConsistencyResult:
         )
 
 
-KNOWN_SCORERS: frozenset[str] = frozenset(
-    {"exact_match", "semantic_similarity", "llm_judge"}
-)
+KNOWN_SCORERS: frozenset[str] = frozenset({"exact_match"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -587,7 +661,11 @@ class EvaluationConfig:
         num_variants: Number of perturbation variants per question.
         concurrency: Maximum concurrent provider API calls.
         max_budget_usd: Spending cap in USD, or ``None`` for unlimited.
-        mca_threshold: MCA threshold for CI pass/fail (0.0 to 1.0).
+        mca_threshold: Consistency level c at which MCA is computed: a
+            question counts as passing when its ``rc_correct >= c``
+            (0.0 to 1.0).
+        min_mca: Minimum ``MCA(mca_threshold)`` for CI to pass (0.0 to
+            1.0). The default 1.0 requires every question to pass.
         core_threshold: Minimum CORE score for CI pass/fail, or ``None``.
         ci_mode: Whether to return exit code based on thresholds.
     """
@@ -600,6 +678,7 @@ class EvaluationConfig:
     concurrency: int = 10
     max_budget_usd: float | None = None
     mca_threshold: float = 1.0
+    min_mca: float = 1.0
     core_threshold: float | None = None
     ci_mode: bool = False
 
@@ -627,6 +706,9 @@ class EvaluationConfig:
         if not (0.0 <= self.mca_threshold <= 1.0):
             msg = "EvaluationConfig.mca_threshold must be between 0.0 and 1.0"
             raise ValidationError(msg)
+        if not (0.0 <= self.min_mca <= 1.0):
+            msg = "EvaluationConfig.min_mca must be between 0.0 and 1.0"
+            raise ValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dictionary.
@@ -643,6 +725,7 @@ class EvaluationConfig:
             "concurrency": self.concurrency,
             "max_budget_usd": self.max_budget_usd,
             "mca_threshold": self.mca_threshold,
+            "min_mca": self.min_mca,
             "core_threshold": self.core_threshold,
             "ci_mode": self.ci_mode,
         }
@@ -673,6 +756,7 @@ class EvaluationConfig:
             concurrency=int(data.get("concurrency", 10)),
             max_budget_usd=float(budget_raw) if budget_raw is not None else None,
             mca_threshold=float(data.get("mca_threshold", 1.0)),
+            min_mca=float(data.get("min_mca", 1.0)),
             core_threshold=float(core_raw) if core_raw is not None else None,
             ci_mode=bool(data.get("ci_mode", False)),
         )

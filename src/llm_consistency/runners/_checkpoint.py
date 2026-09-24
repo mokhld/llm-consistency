@@ -12,12 +12,21 @@ File format (line-delimited JSON, UTF-8):
   the inner mapping is :meth:`QuestionConsistencyResult.to_dict`.
 
 Each append is followed by ``flush`` + ``os.fsync`` so a crash leaves at
-most a single truncated final line, which the reader detects and skips.
+most a single truncated final line. The reader skips it, and the writer
+cuts it off before appending so the next record starts on a fresh line.
 
-The header's ``config_hash`` covers the :class:`EvaluationConfig` plus
-the run ``seed``. Resuming with a different config or seed raises
-:class:`ValidationError`. The *dataset* is intentionally not hashed —
-users are responsible for keeping the dataset stable across resumes.
+The header's ``config_hash`` covers the :class:`EvaluationConfig` fields
+named in :data:`CONFIG_HASH_FIELDS` plus the run ``seed``: the settings
+that change what a run produces. Resuming with a different value for
+any of them raises :class:`ValidationError`; changing anything else
+(``concurrency``, ``max_budget_usd``, pass/fail thresholds, ``ci_mode``)
+is allowed. Version 1 checkpoints, written by releases before 1.1, are
+rejected: those releases scored ``option_reorder`` variants against the
+wrong labels, so their results cannot be mixed with new ones.
+
+The *dataset* is not hashed. :func:`read_checkpoint` can drop results
+for question IDs that are no longer in the dataset (``question_ids``),
+and keeps only the last record for each question ID.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from llm_consistency._version import __version__
 from llm_consistency.types import QuestionConsistencyResult
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Mapping
     from pathlib import Path
     from types import TracebackType
 
@@ -43,17 +53,35 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-CHECKPOINT_VERSION = 1
+# Version 2: variants are scored against the options they presented (1.1).
+CHECKPOINT_VERSION = 2
+
+# EvaluationConfig.to_dict() keys that change what a run produces. Only
+# these and the seed go into the checkpoint hash. Add new result-affecting
+# fields (prompt and decoding settings) here; each must be a to_dict() key.
+CONFIG_HASH_FIELDS: tuple[str, ...] = (
+    "model",
+    "provider",
+    "perturbation_types",
+    "scorer",
+    "num_variants",
+)
 
 
 def compute_config_hash(config: EvaluationConfig, seed: int) -> str:
-    """Stable SHA-256 over the run's identity-defining config + seed.
+    """Stable SHA-256 over the result-affecting config fields + seed.
 
-    Any change to model, provider, scorer, perturbation types,
-    ``num_variants``, threshold settings, or ``seed`` invalidates the
-    checkpoint. The dataset is not hashed.
+    Covers the fields in :data:`CONFIG_HASH_FIELDS` and ``seed``. Fields
+    that do not change results, such as ``concurrency``,
+    ``max_budget_usd`` and the pass/fail thresholds, are not hashed. The
+    dataset is not hashed.
     """
-    payload = {"config": config.to_dict(), "seed": seed}
+    snapshot = config.to_dict()
+    return _hash_payload({name: snapshot[name] for name in CONFIG_HASH_FIELDS}, seed)
+
+
+def _hash_payload(config_fields: Mapping[str, Any], seed: int) -> str:
+    payload = {"config": config_fields, "seed": seed}
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -122,12 +150,23 @@ def read_checkpoint(
     *,
     config: EvaluationConfig,
     seed: int,
+    question_ids: Collection[str] | None = None,
 ) -> tuple[CheckpointHeader, tuple[QuestionConsistencyResult, ...]]:
     """Read an existing checkpoint and validate it against ``config``/``seed``.
 
-    Returns the parsed header plus a tuple of all completed
+    Returns the parsed header plus a tuple of the completed
     :class:`QuestionConsistencyResult` instances, in the order they were
-    written.
+    written. If a question ID has more than one record, the last record
+    wins (at the position of the first).
+
+    Args:
+        path: Checkpoint file.
+        config: Configuration of the run being resumed.
+        seed: Seed of the run being resumed.
+        question_ids: If given, results for question IDs not in this
+            collection (for example, questions removed from the dataset
+            since the checkpoint was written) are dropped and logged.
+            Pass the current dataset's IDs when resuming.
 
     Raises:
         ValidationError: file is empty, header is malformed, header
@@ -152,6 +191,15 @@ def read_checkpoint(
 
     header = _parse_header_line(path, lines[0])
 
+    if header.version < CHECKPOINT_VERSION:
+        msg = (
+            f"Checkpoint at {path} was written by an older release "
+            f"(checkpoint version {header.version}, package "
+            f"{header.package_version}) that scored option_reorder variants "
+            "against the wrong labels. Its results cannot be resumed; delete "
+            "the file or point at a new one to start fresh."
+        )
+        raise ValidationError(msg)
     if header.version != CHECKPOINT_VERSION:
         msg = (
             f"Checkpoint at {path} uses version {header.version}, but this "
@@ -162,7 +210,8 @@ def read_checkpoint(
     if header.config_hash != expected_hash:
         msg = (
             f"Checkpoint at {path} was written for a different config (hash "
-            f"{header.config_hash[:12]}… vs current {expected_hash[:12]}…). "
+            f"{header.config_hash[:12]}… vs current {expected_hash[:12]}…): "
+            f"one of {', '.join(CONFIG_HASH_FIELDS)} or the seed differs. "
             "Resuming would mix results from incompatible runs. Delete the "
             "checkpoint file or point at a new one to start fresh."
         )
@@ -207,7 +256,36 @@ def read_checkpoint(
 
         results.append(QuestionConsistencyResult.from_dict(qcr_data))
 
-    return header, tuple(results)
+    return header, _latest_by_id(path, results, question_ids)
+
+
+def _latest_by_id(
+    path: Path,
+    results: list[QuestionConsistencyResult],
+    question_ids: Collection[str] | None,
+) -> tuple[QuestionConsistencyResult, ...]:
+    """Keep the last record per question ID, optionally only for *question_ids*."""
+    by_id = {qcr.question_id: qcr for qcr in results}
+    if len(by_id) < len(results):
+        _logger.warning(
+            "Checkpoint %s: %d duplicate record(s); keeping the last record "
+            "for each question ID.",
+            path,
+            len(results) - len(by_id),
+        )
+    if question_ids is not None:
+        wanted = set(question_ids)
+        stale = [qid for qid in by_id if qid not in wanted]
+        if stale:
+            _logger.warning(
+                "Checkpoint %s: ignoring %d result(s) for question IDs not in "
+                "the dataset.",
+                path,
+                len(stale),
+            )
+            for qid in stale:
+                del by_id[qid]
+    return tuple(by_id.values())
 
 
 def _parse_header_line(path: Path, raw: str) -> CheckpointHeader:
@@ -236,7 +314,9 @@ class CheckpointWriter:
     a header line is written. If the file already exists with content,
     the existing header is validated against ``config`` and ``seed``;
     on mismatch :class:`ValidationError` is raised before any new data
-    is written.
+    is written. An unterminated last line left by a crash is then cut
+    off (or, if it is a complete record, terminated) so appends start on
+    a fresh line.
     """
 
     def __init__(
@@ -256,6 +336,7 @@ class CheckpointWriter:
         if existing_size > 0:
             # Validate the existing header before opening for append.
             read_checkpoint(self.path, config=self._config, seed=self._seed)
+            _repair_last_line(self.path)
             self._fh = self.path.open("a", encoding="utf-8")
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,3 +367,26 @@ class CheckpointWriter:
         self._fh.write("\n")
         self._fh.flush()
         os.fsync(self._fh.fileno())
+
+
+def _repair_last_line(path: Path) -> None:
+    """Make *path* end with a newline so the next append starts a new line.
+
+    A crash can leave the last line without its newline. If that line
+    parses as JSON it is a complete record and only the newline is
+    added. Otherwise it is a partial write, which :func:`read_checkpoint`
+    skips, and it is removed.
+    """
+    with path.open("rb+") as fh:
+        data = fh.read()
+        if data.endswith(b"\n"):
+            return
+        start = data.rfind(b"\n") + 1
+        try:
+            json.loads(data[start:])
+        except ValueError:
+            fh.truncate(start)
+        else:
+            fh.write(b"\n")
+        fh.flush()
+        os.fsync(fh.fileno())

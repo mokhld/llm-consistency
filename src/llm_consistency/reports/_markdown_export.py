@@ -9,6 +9,7 @@ UTF-8 write following the same pattern as :func:`export_json` and
 from __future__ import annotations
 
 import contextlib
+import html
 import io
 import os
 import tempfile
@@ -48,6 +49,8 @@ def export_markdown(
        *tau_agree*.
     4. ``## CAR curve`` table — five evenly-spaced threshold points.
     5. ``## Per-question results`` table — one row per question.
+       Question IDs and answer labels are escaped (see :func:`_md_cell`)
+       so dataset or model text cannot break the table.
     """
     buf = io.StringIO()
     buf.write("# LLM Consistency Report\n\n")
@@ -152,12 +155,24 @@ def _write_per_question(buf: io.StringIO, report: EvaluationReport) -> None:
     buf.write("|---|---|---|---|---|---|\n")
     for qcr in report.results:
         dist = ", ".join(
-            f"`{label}`={count}"
+            f"{_md_cell(label)}={count}"
             for label, count in sorted(qcr.answer_distribution.items())
         )
         buf.write(
-            f"| {qcr.question_id} | {qcr.rc_correct:.4f} | "
+            f"| {_md_cell(qcr.question_id)} | {qcr.rc_correct:.4f} | "
             f"{qcr.rc_agree:.4f} | {qcr.total_variants} | "
             f"{qcr.correct_count} | {dist} |\n"
         )
     buf.write("\n")
+
+
+def _md_cell(text: str) -> str:
+    """Escape *text* for use inside a Markdown table cell.
+
+    Backslashes, pipes and backticks are backslash-escaped, newlines
+    become spaces, and ``&``, ``<`` and ``>`` become HTML entities so
+    the text cannot end the row, open a code span, or inject raw HTML.
+    """
+    text = text.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
+    text = " ".join(text.splitlines())
+    return html.escape(text, quote=False)

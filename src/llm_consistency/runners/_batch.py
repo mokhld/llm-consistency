@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from contextlib import ExitStack
-from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,21 +18,18 @@ from llm_consistency._exceptions import ValidationError
 from llm_consistency.runners._checkpoint import CheckpointWriter, read_checkpoint
 from llm_consistency.runners._metadata import RunMetadata
 from llm_consistency.runners._pipeline import (
-    build_scored_qcr,
-    generate_variants_for_question,
-    render_prompt,
+    error_summary,
+    has_error_variants,
+    process_question,
+    warn_if_budget_not_enforced,
 )
-from llm_consistency.scoring import _extract_mc_answer
-from llm_consistency.types import (
-    EvaluationReport,
-    LLMResponse,
-    MCQuestion,
-    ScoredResponse,
-)
+from llm_consistency.types import EvaluationReport, MCQuestion
 
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from rich.progress import Progress
 
     from llm_consistency.datasets._base import BaseDataset
@@ -49,9 +47,11 @@ class BatchRunner:
     Orchestrates: generate variants -> render prompts -> query LLM ->
     score responses -> build QCRs -> aggregate into EvaluationReport.
 
-    Async concurrency is bounded by ``config.concurrency`` via an
-    ``asyncio.Semaphore``.  An optional Rich ``Progress`` instance
-    enables live progress display during batch execution.
+    Questions are processed concurrently, and the number of provider calls
+    in flight is bounded by ``config.concurrency`` via an
+    ``asyncio.Semaphore``.  ``report.results`` stays in dataset order.
+    An optional Rich ``Progress`` instance enables live progress display
+    during batch execution.
 
     After :meth:`run` completes, the :attr:`last_metadata` attribute
     holds the :class:`RunMetadata` captured at the start of the run.
@@ -87,46 +87,46 @@ class BatchRunner:
                 making long evaluations resumable across crashes. The
                 dataset is *not* hashed into the checkpoint; users are
                 responsible for keeping the dataset stable across
-                resumes.
+                resumes.  Questions with a failed variant are not
+                written to the checkpoint, so a resume retries them.
 
         Returns:
             A complete :class:`EvaluationReport` with per-question
             consistency results and aggregate metrics.
+
+        Raises:
+            BudgetExceededError: If the provider's budget cap is reached.
+                The run is aborted and outstanding queries are cancelled;
+                questions finished before that are already checkpointed.
         """
         semaphore = asyncio.Semaphore(config.concurrency)
+        warn_if_budget_not_enforced(config, provider, _logger)
         self.last_metadata = RunMetadata.capture(config, seed)
 
-        ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
-        completed_ids: set[str] = set()
-        results: list[QuestionConsistencyResult] = []
+        items = list(dataset)
+        # Non-MC questions (open-ended) are not yet supported.
+        questions = [q for q in items if isinstance(q, MCQuestion)]
+        skipped = len(items) - len(questions)
 
-        if (
-            ckpt_path is not None
-            and ckpt_path.exists()
-            and ckpt_path.stat().st_size > 0
-        ):
-            _, prior = read_checkpoint(ckpt_path, config=config, seed=seed)
-            results.extend(prior)
-            completed_ids = {qcr.question_id for qcr in prior}
-            if completed_ids:
-                _logger.info(
-                    "BatchRunner resuming from checkpoint %s: %d question(s) "
-                    "already complete, will be skipped.",
-                    ckpt_path,
-                    len(completed_ids),
-                )
+        ckpt_path = Path(checkpoint_path) if checkpoint_path is not None else None
+        slots = _resume_slots(ckpt_path, questions, config, seed)
+        resumed = sum(1 for qcr in slots if qcr is not None)
 
         # Set up optional Rich progress task
-        task_id = None
+        advance: Callable[[], None] | None = None
         if progress is not None:
             task_id = progress.add_task(
                 "Evaluating questions...",
-                total=len(dataset),
+                total=len(questions),
             )
-            if completed_ids:
-                progress.advance(task_id, advance=len(completed_ids))
+            if resumed:
+                progress.advance(task_id, advance=resumed)
+            advance = partial(progress.advance, task_id)
 
-        skipped = 0
+        async def _evaluate(i: int) -> QuestionConsistencyResult:
+            return await process_question(
+                questions[i], config, provider, scorer, semaphore, seed
+            )
 
         with ExitStack() as stack:
             writer: CheckpointWriter | None = None
@@ -134,26 +134,9 @@ class BatchRunner:
                 writer = stack.enter_context(
                     CheckpointWriter(ckpt_path, config=config, seed=seed)
                 )
-
-            for question in dataset:
-                if not isinstance(question, MCQuestion):
-                    # Non-MC questions (open-ended) are not yet supported.
-                    skipped += 1
-                    continue
-
-                if question.id in completed_ids:
-                    # Already in the checkpoint; do not re-query the provider.
-                    continue
-
-                qcr = await self._process_question(
-                    question, config, provider, scorer, semaphore, seed
-                )
-                results.append(qcr)
-                if writer is not None:
-                    writer.append(qcr)
-
-                if progress is not None and task_id is not None:
-                    progress.advance(task_id)
+            unsaved = await _fill_slots(
+                slots, _evaluate, config.concurrency, writer, advance
+            )
 
         if skipped:
             _logger.warning(
@@ -161,6 +144,16 @@ class BatchRunner:
                 "(open-ended not yet supported)",
                 skipped,
             )
+
+        results = [qcr for qcr in slots if qcr is not None]
+        summary = error_summary(results)
+        if summary is not None:
+            if unsaved:
+                summary += (
+                    f"; {unsaved} question(s) with errors were not checkpointed "
+                    "and will be retried on resume"
+                )
+            _logger.warning("BatchRunner: %s.", summary)
 
         # Compute aggregates
         total_questions = len(results)
@@ -184,97 +177,87 @@ class BatchRunner:
             mean_rc_agree=mean_rc_agree,
         )
 
-    async def _process_question(
-        self,
-        question: MCQuestion,
-        config: EvaluationConfig,
-        provider: BaseLLMProvider,
-        scorer: BaseScorer,
-        semaphore: asyncio.Semaphore,
-        seed: int,
-    ) -> QuestionConsistencyResult:
-        """Process a single question through the pipeline.
 
-        Args:
-            question: The MC question to evaluate.
-            config: Evaluation configuration.
-            provider: LLM provider.
-            scorer: Response scorer.
-            semaphore: Concurrency semaphore.
-            seed: Random seed.
+def _resume_slots(
+    ckpt_path: Path | None,
+    questions: list[MCQuestion],
+    config: EvaluationConfig,
+    seed: int,
+) -> list[QuestionConsistencyResult | None]:
+    """Return one slot per question, filled from the checkpoint when present.
 
-        Returns:
-            A QuestionConsistencyResult for this question.
-        """
-        # 1. Generate variants
-        variants = generate_variants_for_question(question, config, seed)
+    Checkpointed results for ids that are no longer in the dataset are
+    dropped, and a repeated id resolves to its last record.
+    """
+    prior_by_id: dict[str, QuestionConsistencyResult] = {}
+    if ckpt_path is not None and ckpt_path.exists() and ckpt_path.stat().st_size > 0:
+        _, prior = read_checkpoint(
+            ckpt_path,
+            config=config,
+            seed=seed,
+            question_ids={q.id for q in questions},
+        )
+        prior_by_id = {qcr.question_id: qcr for qcr in prior}
+    slots = [prior_by_id.get(q.id) for q in questions]
+    resumed = sum(1 for qcr in slots if qcr is not None)
+    if resumed:
+        _logger.info(
+            "BatchRunner resuming from checkpoint %s: %d question(s) "
+            "already complete, will be skipped.",
+            ckpt_path,
+            resumed,
+        )
+    return slots
 
-        # 2. Render prompts and build query pairs
-        prompts: list[tuple[str, str]] = []
-        for i, variant in enumerate(variants):
-            prompt_text = render_prompt(variant)
-            variant_qid = f"{question.id}_v{i}"
-            prompts.append((prompt_text, variant_qid))
 
-        # 3. Query LLM concurrently (bounded by semaphore).
-        # Per-variant errors are captured so one failure does not tear down
-        # the whole batch; failed variants are recorded as an empty raw
-        # output plus an ``error`` ScoredResponse so they participate in
-        # rc_correct (always False) and rc_agree (as a distinct sentinel).
-        async def _bounded_query(prompt: str, qid: str) -> tuple[str, str, str | None]:
-            """Query with semaphore and return (qid, raw_output, error)."""
-            async with semaphore:
-                try:
-                    resp = await provider.query(prompt, qid)
-                except Exception as exc:
-                    # Capture all per-variant failures so one bad call does not
-                    # tear down the batch; the error is recorded on the
-                    # ScoredResponse downstream.
-                    return (qid, "", f"{type(exc).__name__}: {exc}")
-                return (qid, resp.raw_output, None)
+async def _fill_slots(
+    slots: list[QuestionConsistencyResult | None],
+    evaluate: Callable[[int], Awaitable[QuestionConsistencyResult]],
+    max_running: int,
+    writer: CheckpointWriter | None,
+    advance: Callable[[], None] | None,
+) -> int:
+    """Evaluate every empty slot, at most *max_running* questions at a time.
 
-        tasks = [_bounded_query(p, qid) for p, qid in prompts]
-        query_results = await asyncio.gather(*tasks)
+    Questions start as others finish, so a slow question does not hold up
+    the rest, and memory stays bounded on large datasets.  Results are
+    stored as they finish.  This loop is the only writer of the checkpoint,
+    so appends stay serialized.  A question with a failed variant is kept
+    in *slots* but not checkpointed.  If an evaluation raises, the results
+    that finished with it are stored, the others are cancelled, and the
+    exception propagates.
 
-        # 4. Score each response against the ORIGINAL question
-        valid_labels = frozenset(o.label for o in question.options)
-        scored_responses: list[ScoredResponse] = []
-        variant_data: list[tuple[str, bool]] = []
-
-        for variant, (variant_qid, raw_output, error) in zip(
-            variants, query_results, strict=True
-        ):
-            pt_value = variant.perturbation_type.value
-            if error is not None:
-                scored_responses.append(
-                    ScoredResponse(
-                        question_id=variant_qid,
-                        is_correct=False,
-                        score=0.0,
-                        scoring_method=f"error:{error}",
-                        perturbation_type=pt_value,
-                    )
-                )
-                variant_data.append((f"<error:{variant_qid}>", False))
-                continue
-
-            # Build an LLMResponse for the scorer
-            response = LLMResponse(
-                question_id=variant_qid,
-                raw_output=raw_output,
-                extracted_answer="",
-                model=config.model,
-                provider=config.provider,
+    Returns:
+        The number of finished questions left out of the checkpoint.
+    """
+    todo = deque(i for i, qcr in enumerate(slots) if qcr is None)
+    running: dict[asyncio.Future[QuestionConsistencyResult], int] = {}
+    unsaved = 0
+    try:
+        while todo or running:
+            while todo and len(running) < max_running:
+                i = todo.popleft()
+                running[asyncio.ensure_future(evaluate(i))] = i
+            done, _ = await asyncio.wait(
+                running.keys(), return_when=asyncio.FIRST_COMPLETED
             )
-
-            sr = scorer.score(response, question)
-            sr = replace(sr, perturbation_type=pt_value)
-            scored_responses.append(sr)
-
-            # Extract answer label for variant_data (answer distribution)
-            extracted = _extract_mc_answer(raw_output, valid_labels)
-            answer_str = extracted if extracted is not None else raw_output.strip()
-            variant_data.append((answer_str, sr.is_correct))
-
-        # 5. Build QCR with scored_responses populated
-        return build_scored_qcr(question.id, variant_data, tuple(scored_responses))
+            # Questions that finish together are stored in dataset order.
+            for i, task in sorted((running.pop(t), t) for t in done):
+                if task.exception() is not None:
+                    continue
+                qcr = slots[i] = task.result()
+                if writer is not None:
+                    if has_error_variants(qcr):
+                        unsaved += 1
+                    else:
+                        writer.append(qcr)
+                if advance is not None:
+                    advance()
+            for task in done:
+                task.result()  # re-raise the first failure, if any
+    except BaseException:
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+        raise
+    return unsaved

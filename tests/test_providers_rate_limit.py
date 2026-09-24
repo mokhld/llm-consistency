@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -99,3 +101,37 @@ class TestAsyncTokenBucketAcquire:
             assert bucket._tokens == pytest.approx(1.0)
             await bucket.acquire()  # 1 -> 0
             assert bucket._tokens == pytest.approx(0.0)
+
+
+class TestAsyncTokenBucketThroughput:
+    """Sustained rate measured over real time, not token counts."""
+
+    async def test_sustained_rate_matches_configured_rate(self) -> None:
+        """40 concurrent acquirers after the burst run at the configured rate.
+
+        The bucket used to count its sleep twice and ran at about 2x.
+        """
+        rate = 200.0
+        bucket = AsyncTokenBucket(rate=rate, capacity=5)
+        for _ in range(5):  # spend the initial burst
+            await bucket.acquire()
+
+        n = 40
+        t0 = time.monotonic()
+        await asyncio.gather(*(bucket.acquire() for _ in range(n)))
+        measured = n / (time.monotonic() - t0)
+
+        assert measured <= 1.15 * rate, f"{measured:.0f}/s exceeds {rate:.0f}/s"
+        assert measured >= 0.5 * rate, f"{measured:.0f}/s is far below {rate:.0f}/s"
+
+    async def test_last_refill_advances_past_the_sleep(self) -> None:
+        bucket = AsyncTokenBucket(rate=10.0, capacity=1)
+        frozen = bucket._last_refill
+        with (
+            patch(f"{_RATE_LIMIT_MOD}.time.monotonic", return_value=frozen),
+            patch(f"{_RATE_LIMIT_MOD}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await bucket.acquire()  # uses the initial token
+            await bucket.acquire()  # sleeps 0.1s for the next one
+        assert bucket._tokens == 0.0
+        assert bucket._last_refill == pytest.approx(frozen + 0.1)
