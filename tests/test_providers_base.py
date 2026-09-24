@@ -18,7 +18,7 @@ from llm_consistency.providers._base import (
 from llm_consistency.providers._batch_result import BatchResult
 from llm_consistency.providers._budget import BudgetExceededError, CostPerToken
 from llm_consistency.providers._rate_limit import AsyncTokenBucket
-from llm_consistency.types import LLMResponse
+from llm_consistency.types import GenerationParams, LLMResponse
 
 _RETRY_MOD = "llm_consistency.providers._retry"
 
@@ -52,6 +52,7 @@ class _MockProvider(BaseLLMProvider):
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         attempt = self._call_count
         self._call_count += 1
@@ -144,6 +145,7 @@ class TestAbstract:
                 prompt: str,
                 *,
                 system: str | None = None,
+                generation: GenerationParams | None = None,
             ) -> _RawResponse:
                 return _DEFAULT_RAW  # pragma: no cover
 
@@ -641,3 +643,61 @@ class TestBudgetUnderConcurrency:
         short = provider._estimate_cost("p", None)
         long = provider._estimate_cost("x" * 30_000, "system")
         assert long > short
+
+
+# ---------------------------------------------------------------------------
+# Tests: generation settings reach _send_request
+# ---------------------------------------------------------------------------
+class _RecordingProvider(BaseLLMProvider):
+    """Records the keyword arguments each _send_request call receives."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(model="mock-model", **kwargs)  # type: ignore[arg-type]
+        self.calls: list[dict[str, object]] = []
+
+    @property
+    def provider_name(self) -> str:
+        return "mock"
+
+    async def _send_request(self, prompt: str, **kwargs: object) -> _RawResponse:
+        self.calls.append(kwargs)
+        return _DEFAULT_RAW
+
+
+class _LegacyProvider(BaseLLMProvider):
+    """A provider written before _send_request took ``generation``."""
+
+    @property
+    def provider_name(self) -> str:
+        return "legacy"
+
+    async def _send_request(  # type: ignore[override]
+        self, prompt: str, *, system: str | None = None
+    ) -> _RawResponse:
+        return _DEFAULT_RAW
+
+
+class TestGenerationForwarding:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("budget", [None, 1.0], ids=["no-budget", "budget"])
+    async def test_generation_passed_when_set(self, budget: float | None) -> None:
+        """Both the first budgeted request and later ones forward it."""
+        provider = _RecordingProvider(max_budget_usd=budget, pricing=_PRICING)
+        generation = GenerationParams(temperature=0.0, max_tokens=64, seed=7)
+        await provider.query("p", "q1", system="sys", generation=generation)
+        await provider.query("p", "q2", generation=generation)
+        assert provider.calls == [
+            {"system": "sys", "generation": generation},
+            {"system": None, "generation": generation},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_generation_left_out_when_unset(self) -> None:
+        provider = _RecordingProvider()
+        await provider.query("p", "q1")
+        assert provider.calls == [{"system": None}]
+
+    @pytest.mark.asyncio
+    async def test_override_without_generation_still_works(self) -> None:
+        resp = await _LegacyProvider(model="x").query("p", "q1", system="sys")
+        assert resp.raw_output == _DEFAULT_RAW.content

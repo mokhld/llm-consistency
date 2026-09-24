@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from llm_consistency.providers._base import EmptyResponseError, _RawResponse
+from llm_consistency.types import GenerationParams
 
 
 @pytest.fixture(autouse=True)
@@ -252,3 +253,37 @@ class TestLiteLLMSendRequest:
                 await provider._send_request("prompt")
             assert exc.value.prompt_tokens == 12
             assert exc.value.completion_tokens == 256
+
+
+# ---------------------------------------------------------------------------
+# Tests: generation settings
+# ---------------------------------------------------------------------------
+class TestLiteLLMGenerationParams:
+    @pytest.mark.parametrize(
+        ("generation", "expected"),
+        [
+            (None, {}),
+            (GenerationParams(), {}),
+            (GenerationParams(temperature=0.0), {"temperature": 0.0}),
+            (GenerationParams(max_tokens=64), {"max_tokens": 64}),
+            (GenerationParams(seed=7), {"seed": 7}),
+            (
+                GenerationParams(temperature=0.5, max_tokens=64, seed=7),
+                {"temperature": 0.5, "max_tokens": 64, "seed": 7},
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sent_only_when_set(
+        self, generation: GenerationParams | None, expected: dict[str, object]
+    ) -> None:
+        mock_module, mock_acompletion = _make_mock_litellm_module()
+        with patch.dict(sys.modules, {"litellm": mock_module}):
+            cls = _import_litellm_provider()
+            provider = cls(model="openai/gpt-4o")
+            await provider._send_request("prompt", generation=generation)
+            call_kwargs = mock_acompletion.call_args.kwargs
+            sent = {
+                k: v for k, v in call_kwargs.items() if k not in ("model", "messages")
+            }
+            assert sent == expected

@@ -34,6 +34,7 @@ from llm_consistency import (
     BatchRunner,
     EvaluationConfig,
     ExactMatchScorer,
+    GenerationParams,
     LLMResponse,
     MCDataset,
     PerturbationType,
@@ -59,6 +60,7 @@ class FlakyMockProvider(BaseIdMockProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         base_qid = question_id.split("_v")[0]
         self._questions_seen.add(base_qid)
@@ -67,7 +69,9 @@ class FlakyMockProvider(BaseIdMockProvider):
             # the batch genuinely halts mid-flight, like a SIGKILL.
             msg = f"simulated crash on {base_qid}"
             raise SimulatedCrash(msg)
-        return await super().query(prompt, question_id, system=system)
+        return await super().query(
+            prompt, question_id, system=system, generation=generation
+        )
 
 
 async def run_pass(

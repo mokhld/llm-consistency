@@ -3,14 +3,16 @@
 The other provider tests replace each SDK with a ``MagicMock``, so they
 never see the exception classes the SDKs really raise. These tests drive
 the installed SDKs through an in-memory HTTP transport, so each SDK's own
-status-to-exception mapping runs. CI installs ``.[all]``; each test skips
-when its SDK is missing.
+status-to-exception mapping runs. The same transport shows the request
+body each SDK sends for the generation settings. CI installs ``.[all]``;
+each test skips when its SDK is missing.
 """
 
 from __future__ import annotations
 
 import functools
 import importlib
+import json
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -18,6 +20,7 @@ import httpx
 import pytest
 
 from llm_consistency.providers._base import EmptyResponseError
+from llm_consistency.types import GenerationParams
 
 _RETRY_MOD = "llm_consistency.providers._retry"
 _FAST_RETRY: dict[str, Any] = {
@@ -507,3 +510,65 @@ class TestOllamaErrors:
         with pytest.raises(EmptyResponseError):
             await provider.query("prompt", "q1")
         assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Generation settings in the request body
+# ---------------------------------------------------------------------------
+_GENERATION = GenerationParams(temperature=0.0, max_tokens=64, seed=7)
+_SAMPLING_KEYS = {"temperature", "max_tokens", "max_completion_tokens", "seed"}
+
+
+def _body(request: Any) -> dict[str, Any]:
+    return json.loads(request.content)  # type: ignore[no-any-return]
+
+
+class TestGenerationParamsOnTheWire:
+    """The installed SDKs accept each setting and send it under the API's name."""
+
+    async def test_openai(self) -> None:
+        provider, calls, _ = _openai_provider([_openai_completion()] * 2)
+        await provider.query("prompt", "q1", system="Be brief.", generation=_GENERATION)
+        await provider.query("prompt", "q2")
+        sent = _body(calls[0])
+        assert sent["temperature"] == 0.0
+        assert sent["max_completion_tokens"] == 64
+        assert sent["seed"] == 7
+        assert "max_tokens" not in sent
+        assert sent["messages"][0] == {"role": "system", "content": "Be brief."}
+        assert not _SAMPLING_KEYS & set(_body(calls[1]))
+
+    async def test_anthropic(self) -> None:
+        provider, calls, _ = _anthropic_provider(
+            lambda http: [_anthropic_text(http), _anthropic_text(http)]
+        )
+        await provider.query("prompt", "q1", system="Be brief.", generation=_GENERATION)
+        await provider.query("prompt", "q2")
+        sent = _body(calls[0])
+        assert sent["temperature"] == 0.0
+        assert sent["max_tokens"] == 64
+        assert "seed" not in sent
+        assert sent["system"] == "Be brief."
+        assert _SAMPLING_KEYS & set(_body(calls[1])) == {"max_tokens"}
+        assert _body(calls[1])["max_tokens"] == 1024
+
+    async def test_ollama(self) -> None:
+        provider, calls, _ = _ollama_provider([_ollama_chat(), _ollama_chat()])
+        await provider.query("prompt", "q1", generation=_GENERATION)
+        await provider.query("prompt", "q2")
+        assert _body(calls[0])["options"] == {
+            "temperature": 0.0,
+            "num_predict": 64,
+            "seed": 7,
+        }
+        assert _body(calls[1]).get("options") is None
+
+    async def test_litellm(self, litellm_via: Any) -> None:
+        provider, calls = litellm_via([_openai_completion()] * 2)
+        await provider.query("prompt", "q1", generation=_GENERATION)
+        await provider.query("prompt", "q2")
+        sent = _body(calls[0])
+        assert sent["temperature"] == 0.0
+        assert sent["max_tokens"] == 64
+        assert sent["seed"] == 7
+        assert not _SAMPLING_KEYS & set(_body(calls[1]))

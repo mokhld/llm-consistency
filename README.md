@@ -142,6 +142,11 @@ llm-consistency run [OPTIONS]
 | `--core-threshold` | | none | Minimum CORE for a pass (not checked when unset) |
 | `--max-budget-usd` | | none | Spending cap in USD. The run stops with an error before a request that would exceed it (see [Budget cap](#budget-cap)) |
 | `--rpm` | | `60` | Provider rate limit in requests per minute |
+| `--prompt-template` | | built-in | Prompt template. `{question}` (required) is replaced by the question and its options, `{labels}` by the option labels shown. The default adds a first-line `Answer: X` instruction (see [Prompt and decoding](#prompt-and-decoding)) |
+| `--system-prompt` | | none | System prompt sent with every request |
+| `--temperature` | | not sent | Sampling temperature, 0.0 to 2.0. When unset the provider default applies. Use `0` for models that accept it |
+| `--max-tokens` | | not sent | Maximum output tokens per response. When unset the provider default applies (1024 for Anthropic) |
+| `--generation-seed` | | not sent | Provider sampling seed, separate from `--seed`. Anthropic has no seed and ignores it |
 | `--ci` | | `false` | CI mode: skips the console summary, exits 0 when every check passes and 1 otherwise |
 | `--dry-run` | | `false` | Validate dataset, config, provider, and render one sample prompt without spending tokens. Prints the number of provider calls the run will make and warns when the cost estimate exceeds `--max-budget-usd` |
 
@@ -205,7 +210,7 @@ num_variants: 3
 seed: 42
 ```
 
-`models` and `dataset` are required. The other keys are `perturbations`, `num_variants`, `concurrency`, `scorer`, `seed`, `mca_threshold`, `min_mca`, `core_threshold`, `max_budget_usd` and `rpm`, with the same meaning and defaults as the `run` options. `max_budget_usd` applies to each model separately. Unknown keys are rejected.
+`models` and `dataset` are required. The other keys are `perturbations`, `num_variants`, `concurrency`, `scorer`, `seed`, `mca_threshold`, `min_mca`, `core_threshold`, `max_budget_usd`, `rpm`, `prompt_template`, `system_prompt`, `temperature`, `max_tokens` and `generation_seed`, with the same meaning and defaults as the `run` options. `max_budget_usd` applies to each model separately. Unknown keys are rejected.
 
 Every provider is created before the first model runs, so a bad provider name, a missing SDK or an unpriced model fails before any spend. Models run one after another. Each model's summary is printed, and its report is written to `--output` with run metadata, as soon as that model finishes, so a later failure does not lose earlier results. File names come from the model name with characters other than letters, digits, `.`, `_` and `-` replaced by `_` (`openai/gpt-4o-mini` becomes `openai_gpt-4o-mini.json`); repeated names get `-2`, `-3` suffixes.
 
@@ -285,6 +290,48 @@ max_budget_usd = 1.00
 ```
 
 Use with: `llm-consistency run -c config.yaml -d dataset.json`
+
+## Prompt and decoding
+
+Each variant is sent as one user message. By default the question and its options are followed by an instruction to put the answer on the first line:
+
+```
+What is the capital of France?
+A. London
+B. Paris
+C. Berlin
+D. Madrid
+
+Answer with the label of the correct option. The first line of your response must be "Answer: X", where X is one of A, B, C, D.
+```
+
+The label list is the one the variant shows, so the numbered `format_change` layout asks for one of `1, 2, 3, 4`. The instruction follows the fixed answer format of the CAT paper (section 4.1). The extractor reads the last `Answer: X` in a response, so a model that reasons first and states its answer at the end is still scored correctly. Use `--dry-run` to see the exact prompt, system prompt and decoding settings a run will send.
+
+`--prompt-template` replaces the default. `{question}` is required and is replaced by the question and its options. `{labels}` is optional. Any other placeholder is an error; write a literal brace as `{{` or `}}`. To send the question and options with no instruction, as earlier releases did, pass `--prompt-template "{question}"`. A config file is the easiest place for a multi-line template:
+
+```yaml
+prompt_template: |
+  {question}
+
+  Reply with the label of the correct option only ({labels}).
+system_prompt: You are taking a multiple-choice exam.
+temperature: 0
+max_tokens: 256
+```
+
+`--temperature`, `--max-tokens` and `--generation-seed` are sent only when set; otherwise each provider's own default applies. For repeatable results, use `--temperature 0` with models that accept it. At the default temperature (1.0 for OpenAI and Anthropic), part of the disagreement between variants is sampling noise rather than sensitivity to the perturbation, which inflates the drop in RC_agree and CORE. The default is "not sent" because some models reject the setting: the OpenAI gpt-5 family and other reasoning models accept only their default temperature; on Anthropic, Claude Opus 4.7 and later Opus models and the Claude Fable models reject any temperature, Claude Sonnet 5 accepts only the default, and Opus 4.6, Sonnet 4.6 and Haiku 4.5 accept it. Such a request fails with HTTP 400 and is recorded as a failed variant, so check a new model with a small run first. Anthropic accepts temperatures from 0 to 1.
+
+| Setting | OpenAI | Anthropic | Ollama | LiteLLM |
+|---------|--------|-----------|--------|---------|
+| `temperature` | `temperature` | `temperature` | `options.temperature` | `temperature` |
+| `max_tokens` | `max_completion_tokens` | `max_tokens` (1024 when unset) | `options.num_predict` | `max_tokens` |
+| `generation_seed` | `seed` | not supported, ignored | `options.seed` | `seed` |
+
+A seed makes sampling more repeatable where the provider supports it, but no provider guarantees identical outputs.
+
+The prompt template, system prompt and decoding settings are part of the checkpoint hash, so a run cannot resume a checkpoint written with different values.
+
+From Python, set the same fields on `EvaluationConfig`. The default template is `llm_consistency.DEFAULT_PROMPT_TEMPLATE`. The runners call `provider.query(prompt, question_id, system=..., generation=GenerationParams(...))` and leave out each argument that is not set. A custom provider that overrides `query()` or `_send_request()` should accept both keyword arguments. One that does not keeps working until a system prompt or decoding setting is configured; after that, every request fails with `TypeError`.
 
 ## Dataset Formats
 
@@ -498,7 +545,7 @@ scorer = CustomScorerAdapter(lambda extracted, correct: extracted == correct, si
 # presented it (labels match what the model saw), returns a ScoredResponse.
 def my_scorer(response: LLMResponse, question: MCQuestion) -> ScoredResponse:
     correct = next(o for o in question.options if o.is_correct)
-    is_correct = response.raw_output.strip().startswith(correct.label)
+    is_correct = response.raw_output.strip().startswith(f"Answer: {correct.label}")
     return ScoredResponse(
         question_id=response.question_id,
         is_correct=is_correct,
@@ -760,7 +807,12 @@ With a `.json` path (or any extension other than `.csv`, `.md`, `.markdown`, `.h
     "mca_threshold": 1.0,
     "min_mca": 1.0,
     "core_threshold": null,
-    "ci_mode": false
+    "ci_mode": false,
+    "prompt_template": null,
+    "system_prompt": null,
+    "temperature": null,
+    "max_tokens": null,
+    "generation_seed": null
   },
   "results": [
     {

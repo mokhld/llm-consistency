@@ -11,6 +11,7 @@ from llm_consistency.providers._mock import MockLLMProvider
 from llm_consistency.scoring import ExactMatchScorer
 from llm_consistency.types import (
     EvaluationConfig,
+    GenerationParams,
     LLMResponse,
     MCOption,
     MCQuestion,
@@ -233,12 +234,19 @@ class _FailOnStemProvider(MockLLMProvider):
         self._stem = stem
 
     async def query(
-        self, prompt: str, question_id: str, *, system: str | None = None
+        self,
+        prompt: str,
+        question_id: str,
+        *,
+        system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         if self._stem in prompt:
             msg = "simulated provider outage"
             raise RuntimeError(msg)
-        return await super().query(prompt, question_id, system=system)
+        return await super().query(
+            prompt, question_id, system=system, generation=generation
+        )
 
 
 class TestCIRunnerMinMca:

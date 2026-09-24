@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from llm_consistency.providers._base import EmptyResponseError, _RawResponse
+from llm_consistency.types import GenerationParams
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -280,3 +281,77 @@ class TestSendRequest:
         raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.content == "The answer is"
+
+
+# ---------------------------------------------------------------------------
+# Generation settings
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationParams:
+    """Temperature and max_tokens are sent when set; the seed is ignored."""
+
+    def _provider_with_mock_client(
+        self, response: SimpleNamespace | None = None
+    ) -> tuple[object, MagicMock]:
+        mock_mod = _mock_anthropic_module()
+        mock_client = MagicMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=response or _mock_response()
+        )
+        mock_mod.AsyncAnthropic.return_value = mock_client
+        return _make_provider(mock_mod), mock_client
+
+    @pytest.mark.parametrize(
+        ("generation", "expected"),
+        [
+            (None, {"max_tokens": 1024}),
+            (GenerationParams(), {"max_tokens": 1024}),
+            (
+                GenerationParams(temperature=0.0),
+                {"max_tokens": 1024, "extra_body": {"temperature": 0.0}},
+            ),
+            (GenerationParams(max_tokens=64), {"max_tokens": 64}),
+            (GenerationParams(seed=7), {"max_tokens": 1024}),
+            (
+                GenerationParams(temperature=0.5, max_tokens=64, seed=7),
+                {"max_tokens": 64, "extra_body": {"temperature": 0.5}},
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sent_only_when_set(
+        self, generation: GenerationParams | None, expected: dict[str, object]
+    ) -> None:
+        """anthropic 1.x has no temperature argument, so it goes in extra_body."""
+        provider, mock_client = self._provider_with_mock_client()
+
+        await provider._send_request("prompt", generation=generation)  # type: ignore[union-attr]
+
+        call_kwargs = mock_client.messages.create.call_args[1]
+        sent = {k: v for k, v in call_kwargs.items() if k not in ("model", "messages")}
+        assert sent == expected
+
+    @pytest.mark.asyncio
+    async def test_seed_is_logged_at_debug(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        provider, _ = self._provider_with_mock_client()
+
+        with caplog.at_level("DEBUG", logger="llm_consistency.providers._anthropic"):
+            await provider._send_request(  # type: ignore[union-attr]
+                "prompt", generation=GenerationParams(seed=7)
+            )
+
+        assert any("no seed parameter" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_empty_response_reports_the_limit_sent(self) -> None:
+        provider, _ = self._provider_with_mock_client(
+            _mock_response(empty_content=True, stop_reason="max_tokens"),
+        )
+
+        with pytest.raises(EmptyResponseError, match=r"max_tokens \(64\)"):
+            await provider._send_request(  # type: ignore[union-attr]
+                "prompt", generation=GenerationParams(max_tokens=64)
+            )

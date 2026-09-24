@@ -42,7 +42,9 @@ def dry_run(config: EvaluationConfig, dataset: MCDataset, seed: int = 42) -> Non
 
     sample = mc_questions[0]
     variants = generate_variants_for_question(sample, config, seed)
-    sample_prompt = render_prompt(variants[0])
+    # The prompt exactly as it will be sent: the question in the configured
+    # template (or the default one), with an answer-format instruction.
+    sample_prompt = render_prompt(variants[0], config.prompt_template)
 
     # Each perturbation type yields at most num_variants variants per
     # question, and fewer when it has fewer distinct ones, so count them.

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from llm_consistency.providers._base import EmptyResponseError, _RawResponse
+from llm_consistency.types import GenerationParams
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -233,3 +234,43 @@ class TestSendRequest:
         raw = await provider._send_request("prompt")  # type: ignore[union-attr]
 
         assert raw.content == "The answer is"
+
+
+# ---------------------------------------------------------------------------
+# Generation settings
+# ---------------------------------------------------------------------------
+
+
+class TestGenerationParams:
+    """Each generation setting is sent only when set, under the SDK's name."""
+
+    @pytest.mark.parametrize(
+        ("generation", "expected"),
+        [
+            (None, {}),
+            (GenerationParams(), {}),
+            (GenerationParams(temperature=0.0), {"temperature": 0.0}),
+            (GenerationParams(max_tokens=64), {"max_completion_tokens": 64}),
+            (GenerationParams(seed=7), {"seed": 7}),
+            (
+                GenerationParams(temperature=0.5, max_tokens=64, seed=7),
+                {"temperature": 0.5, "max_completion_tokens": 64, "seed": 7},
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sent_only_when_set(
+        self, generation: GenerationParams | None, expected: dict[str, object]
+    ) -> None:
+        mock_mod = _mock_openai_module()
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=_mock_response())
+        mock_mod.AsyncOpenAI.return_value = mock_client
+        provider = _make_provider(mock_mod)
+
+        await provider._send_request("prompt", generation=generation)  # type: ignore[union-attr]
+
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert set(call_kwargs) - {"model", "messages"} == set(expected)
+        for name, value in expected.items():
+            assert call_kwargs[name] == value

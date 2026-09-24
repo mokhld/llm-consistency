@@ -16,6 +16,7 @@ from llm_consistency.scoring import ExactMatchScorer
 from llm_consistency.types import (
     EvaluationConfig,
     EvaluationReport,
+    GenerationParams,
     MCOption,
     MCQuestion,
     OpenEndedQuestion,
@@ -133,7 +134,7 @@ class TestRenderPrompt:
             stem="Formatted question text\nA. opt1\nB. opt2",
             options=None,
         )
-        text = mod.render_prompt(variant)  # type: ignore[attr-defined]
+        text = mod.render_prompt(variant, "{question}")  # type: ignore[attr-defined]
         assert text == "Formatted question text\nA. opt1\nB. opt2"
 
 
@@ -337,6 +338,7 @@ class _FailingProvider(MockLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> object:
         msg = f"simulated provider failure for {question_id}"
         raise RuntimeError(msg)
@@ -408,9 +410,12 @@ class _CountingProvider(MockLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> object:
         self.queried_ids.append(question_id)
-        return await super().query(prompt, question_id, system=system)
+        return await super().query(
+            prompt, question_id, system=system, generation=generation
+        )
 
 
 def _read_qcr_ids_from_checkpoint(path: Path) -> list[str]:

@@ -6,11 +6,16 @@ Supports three response modes: default, response map, and cycling list.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from typing_extensions import override
 
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
 from llm_consistency.providers._budget import CostPerToken
 from llm_consistency.types import LLMResponse
+
+if TYPE_CHECKING:
+    from llm_consistency.types import GenerationParams
 
 
 class MockLLMProvider(BaseLLMProvider):
@@ -83,6 +88,7 @@ class MockLLMProvider(BaseLLMProvider):
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         """Satisfy the ABC contract.
 
@@ -103,6 +109,7 @@ class MockLLMProvider(BaseLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         """Return a deterministic response based on the configured mode.
 
@@ -113,6 +120,7 @@ class MockLLMProvider(BaseLLMProvider):
             prompt: The user prompt (ignored for response selection).
             question_id: Back-reference for response-map lookup.
             system: Optional system message (ignored).
+            generation: Decoding settings (ignored).
 
         Returns:
             An :class:`LLMResponse` with deterministic content.

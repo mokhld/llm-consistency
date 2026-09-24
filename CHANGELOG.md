@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prompt and decoding settings: `EvaluationConfig.prompt_template`,
+  `system_prompt`, `temperature`, `max_tokens` and `generation_seed`,
+  the `run` flags `--prompt-template`, `--system-prompt`,
+  `--temperature`, `--max-tokens` and `--generation-seed`, and the same
+  keys in `run` and `compare` config files. A template has a required
+  `{question}` placeholder and an optional `{labels}` placeholder, and is
+  validated when the config is built. Decoding settings default to None
+  and are then not sent, so the provider default applies. All five are
+  part of the checkpoint hash.
+- `GenerationParams` and a `generation=` keyword argument on
+  `BaseLLMProvider.query()` and `_send_request()`. The runners build it
+  from the config and pass it with each request. OpenAI sends
+  `temperature`, `max_completion_tokens` and `seed`; Anthropic sends
+  `temperature` (through `extra_body`, since anthropic 1.x has no
+  temperature argument) and `max_tokens`, keeps 1024 as the default
+  `max_tokens`, and ignores the seed; Ollama sends `temperature`,
+  `num_predict` and `seed` in `options`; LiteLLM sends `temperature`,
+  `max_tokens` and `seed`.
+- `DEFAULT_PROMPT_TEMPLATE`. `render_prompt(variant, template, labels)`
+  renders a variant into a template.
+- Dry-run prints the decoding settings and the system prompt, and shows
+  the sample prompt exactly as it will be sent.
 - `--min-mca` / `min_mca` (`EvaluationConfig.min_mca`, default 1.0):
   the MCA pass target, separate from the consistency level
   `--mca-threshold`.
@@ -105,6 +127,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The default prompt changed, so every reported number changes.** Each
+  prompt now ends with an instruction to put the answer on the first
+  line as `Answer: X`, where X is one of the labels the variant shows
+  (`A, B, C, D`, or `1, 2, 3, 4` for the numbered layout). Accuracy,
+  RC_correct, RC_agree, MCA and CORE are not comparable with earlier
+  releases. To send the bare question and options as before, pass
+  `--prompt-template "{question}"` (or `prompt_template="{question}"`).
+  `render_prompt(variant)` also returns the prompt in the default
+  template now.
+- The runners pass `system=` and `generation=` to `provider.query()`
+  only when they are set. A custom provider that overrides `query()` or
+  `_send_request()` without these keyword arguments keeps working until
+  a system prompt or decoding setting is configured; after that, each
+  request fails with `TypeError` and is recorded as a failed variant.
 - `option_reorder` and numbered-format answers are scored against the
   options as the model saw them, and `answer_distribution` is keyed by
   each option's label in the original question. Scores for
@@ -144,8 +180,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Questions with failed variants are not written to the checkpoint, so
   a resume retries them. The checkpoint config hash covers only
   result-affecting fields (model, provider, perturbation types, scorer,
-  num_variants, seed), so changing concurrency, budget or thresholds no
-  longer blocks a resume. The checkpoint format is now version 2;
+  num_variants, prompt template, system prompt, temperature, max_tokens,
+  generation seed, seed), so changing concurrency, budget or thresholds
+  no longer blocks a resume. The checkpoint format is now version 2;
   version 1 checkpoints from earlier releases are rejected, because
   their `option_reorder` results were scored against the wrong labels.
 - Variants from a custom perturbation that does not set

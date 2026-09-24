@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import string
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -644,6 +645,50 @@ class QuestionConsistencyResult:
 
 KNOWN_SCORERS: frozenset[str] = frozenset({"exact_match"})
 
+# Placeholders a prompt template may use; ``question`` is required.
+_TEMPLATE_FIELDS = frozenset({"question", "labels"})
+
+
+def _check_prompt_template(template: str) -> None:
+    """Raise ValidationError unless *template* is a valid prompt template."""
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as exc:
+        msg = f"EvaluationConfig.prompt_template is not a valid template: {exc}"
+        raise ValidationError(msg) from None
+    fields = {name for _, name, _, _ in parsed if name is not None}
+    unknown = sorted(fields - _TEMPLATE_FIELDS)
+    if unknown:
+        msg = (
+            f"EvaluationConfig.prompt_template has unknown placeholder(s) "
+            f"{unknown}; only {{question}} and {{labels}} are allowed. "
+            "Write a literal brace as {{ or }}."
+        )
+        raise ValidationError(msg)
+    if "question" not in fields:
+        msg = "EvaluationConfig.prompt_template must contain a {question} placeholder"
+        raise ValidationError(msg)
+
+
+@dataclass(frozen=True, kw_only=True)
+class GenerationParams:
+    """Decoding settings sent with each provider request.
+
+    A field left as ``None`` is not sent, so the provider's own default
+    applies.  The runners build this from :class:`EvaluationConfig` and
+    pass it to :meth:`BaseLLMProvider.query` as ``generation=``.
+
+    Attributes:
+        temperature: Sampling temperature.
+        max_tokens: Maximum number of output tokens.
+        seed: Provider sampling seed.  Anthropic has no seed parameter
+            and ignores it.
+    """
+
+    temperature: float | None = None
+    max_tokens: int | None = None
+    seed: int | None = None
+
 
 @dataclass(frozen=True, kw_only=True)
 class EvaluationConfig:
@@ -668,6 +713,18 @@ class EvaluationConfig:
             1.0). The default 1.0 requires every question to pass.
         core_threshold: Minimum CORE score for CI pass/fail, or ``None``.
         ci_mode: Whether to return exit code based on thresholds.
+        prompt_template: Template for the prompt sent to the model, or
+            ``None`` for :data:`~llm_consistency.runners.DEFAULT_PROMPT_TEMPLATE`.
+            ``{question}`` (required) is replaced by the rendered question
+            and options, and ``{labels}`` by the option labels shown, comma
+            separated (``A, B, C, D`` or ``1, 2, 3, 4``).
+        system_prompt: System message sent with every request, or ``None``.
+        temperature: Sampling temperature (0.0 to 2.0), or ``None`` to
+            leave it to the provider default.
+        max_tokens: Maximum output tokens per response (>= 1), or ``None``
+            to leave it to the provider default.
+        generation_seed: Provider sampling seed, or ``None``.  Distinct
+            from the perturbation seed passed to the runners.
     """
 
     model: str
@@ -681,6 +738,11 @@ class EvaluationConfig:
     min_mca: float = 1.0
     core_threshold: float | None = None
     ci_mode: bool = False
+    prompt_template: str | None = None
+    system_prompt: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    generation_seed: int | None = None
 
     def __post_init__(self) -> None:
         """Validate construction-time invariants (eager validation)."""
@@ -709,6 +771,15 @@ class EvaluationConfig:
         if not (0.0 <= self.min_mca <= 1.0):
             msg = "EvaluationConfig.min_mca must be between 0.0 and 1.0"
             raise ValidationError(msg)
+        if self.prompt_template is not None:
+            _check_prompt_template(self.prompt_template)
+        # The chained comparison is False for NaN, so NaN is rejected too.
+        if self.temperature is not None and not (0.0 <= self.temperature <= 2.0):
+            msg = "EvaluationConfig.temperature must be between 0.0 and 2.0"
+            raise ValidationError(msg)
+        if self.max_tokens is not None and self.max_tokens < 1:
+            msg = "EvaluationConfig.max_tokens must be >= 1"
+            raise ValidationError(msg)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dictionary.
@@ -728,6 +799,11 @@ class EvaluationConfig:
             "min_mca": self.min_mca,
             "core_threshold": self.core_threshold,
             "ci_mode": self.ci_mode,
+            "prompt_template": self.prompt_template,
+            "system_prompt": self.system_prompt,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "generation_seed": self.generation_seed,
         }
 
     @classmethod
@@ -747,6 +823,11 @@ class EvaluationConfig:
         )
         core_raw = data.get("core_threshold")
         budget_raw = data.get("max_budget_usd")
+        template_raw = data.get("prompt_template")
+        system_raw = data.get("system_prompt")
+        temperature_raw = data.get("temperature")
+        max_tokens_raw = data.get("max_tokens")
+        generation_seed_raw = data.get("generation_seed")
         return cls(
             model=str(data["model"]),
             provider=str(data["provider"]),
@@ -759,6 +840,15 @@ class EvaluationConfig:
             min_mca=float(data.get("min_mca", 1.0)),
             core_threshold=float(core_raw) if core_raw is not None else None,
             ci_mode=bool(data.get("ci_mode", False)),
+            prompt_template=str(template_raw) if template_raw is not None else None,
+            system_prompt=str(system_raw) if system_raw is not None else None,
+            temperature=(
+                float(temperature_raw) if temperature_raw is not None else None
+            ),
+            max_tokens=int(max_tokens_raw) if max_tokens_raw is not None else None,
+            generation_seed=(
+                int(generation_seed_raw) if generation_seed_raw is not None else None
+            ),
         )
 
 

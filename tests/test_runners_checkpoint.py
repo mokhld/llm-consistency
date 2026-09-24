@@ -98,6 +98,23 @@ class TestComputeConfigHash:
         changed = dataclasses.replace(config, **{field: value})
         assert compute_config_hash(config, 42) != compute_config_hash(changed, 42)
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("prompt_template", "{question}"),
+            ("system_prompt", "You are careful."),
+            ("temperature", 0.0),
+            ("max_tokens", 256),
+            ("generation_seed", 7),
+        ],
+    )
+    def test_changes_with_prompt_and_decoding_settings(
+        self, field: str, value: object
+    ) -> None:
+        config = _make_config()
+        changed = dataclasses.replace(config, **{field: value})
+        assert compute_config_hash(config, 42) != compute_config_hash(changed, 42)
+
     def test_ignores_fields_that_do_not_change_results(self) -> None:
         config = _make_config()
         changed = dataclasses.replace(
@@ -105,6 +122,7 @@ class TestComputeConfigHash:
             concurrency=8,
             max_budget_usd=5.0,
             mca_threshold=0.5,
+            min_mca=0.5,
             core_threshold=0.3,
             ci_mode=True,
         )

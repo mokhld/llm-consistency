@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,6 +15,9 @@ from llm_consistency.providers._cost import (
     estimate_cost,
     get_model_pricing,
 )
+
+if TYPE_CHECKING:
+    from llm_consistency.types import GenerationParams
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +147,7 @@ class _CostTestProvider(BaseLLMProvider):
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         return self._raw
 

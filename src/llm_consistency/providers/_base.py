@@ -17,7 +17,7 @@ from llm_consistency.providers._budget import BudgetTracker, CostPerToken
 from llm_consistency.providers._cost import get_model_pricing
 from llm_consistency.providers._rate_limit import AsyncTokenBucket
 from llm_consistency.providers._retry import parse_retry_after, retry_with_backoff
-from llm_consistency.types import LLMResponse
+from llm_consistency.types import GenerationParams, LLMResponse
 
 
 class EmptyResponseError(LLMConsistencyError):
@@ -154,12 +154,17 @@ class BaseLLMProvider(ABC):
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         """Make one API call.  No retry/rate-limit logic here.
 
         Args:
             prompt: The user prompt to send.
             system: Optional system message.
+            generation: Decoding settings. Send each field that is not
+                ``None``. :meth:`query` passes this argument only when it
+                is set, so an override written without it keeps working
+                until generation settings are used.
 
         Returns:
             A ``_RawResponse`` with content and token metadata.
@@ -230,6 +235,7 @@ class BaseLLMProvider(ABC):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         """Rate-limited, retried, budgeted single query.
 
@@ -244,6 +250,8 @@ class BaseLLMProvider(ABC):
             prompt: The user prompt to send.
             question_id: Back-reference to the originating question.
             system: Optional system message.
+            generation: Decoding settings, or ``None`` for the provider
+                defaults.
 
         Returns:
             An ``LLMResponse`` frozen dataclass.
@@ -257,24 +265,34 @@ class BaseLLMProvider(ABC):
             async with self._first_request_lock:
                 if not self._cost_observed:
                     try:
-                        return await self._query(prompt, question_id, system)
+                        return await self._query(
+                            prompt, question_id, system, generation
+                        )
                     finally:
                         self._cost_observed = True
-        return await self._query(prompt, question_id, system)
+        return await self._query(prompt, question_id, system, generation)
 
     async def _query(
-        self, prompt: str, question_id: str, system: str | None
+        self,
+        prompt: str,
+        question_id: str,
+        system: str | None,
+        generation: GenerationParams | None,
     ) -> LLMResponse:
         """Run one budgeted, rate-limited, retried query (see :meth:`query`)."""
         # 1. Reserve the estimated cost; raises if it does not fit
         estimated_cost = self._estimate_cost(prompt, system)
         await self._budget.reserve(estimated_cost=estimated_cost)
 
+        # Passed only when set, so _send_request overrides written before
+        # the argument existed keep working.
+        extra = {"generation": generation} if generation is not None else {}
+
         # 2. Retry with backoff; every attempt takes a rate-limit token
         async def _attempt() -> _RawResponse:
             await self._rate_limiter.acquire()
             async with asyncio.timeout(self._request_timeout_s):
-                return await self._send_request(prompt, system=system)
+                return await self._send_request(prompt, system=system, **extra)
 
         # 3. Settle the reservation. A request that timed out or was
         #    cancelled keeps its reservation, because it may still be

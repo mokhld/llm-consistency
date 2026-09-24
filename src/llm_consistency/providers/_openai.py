@@ -21,6 +21,8 @@ from llm_consistency.providers._retry import is_retryable_status
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionMessageParam
 
+    from llm_consistency.types import GenerationParams
+
 
 class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
     """OpenAI and OpenAI-compatible provider.
@@ -76,13 +78,15 @@ class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         """Send a single chat completion request.
 
         Builds a messages list with optional system message,
         calls the OpenAI Chat Completions API, and maps the
         response to a :class:`_RawResponse`.  A refusal is returned as
-        the content.
+        the content.  Generation settings that are set are sent as
+        ``temperature``, ``max_completion_tokens`` and ``seed``.
 
         Raises:
             EmptyResponseError: If the output token limit was reached
@@ -93,10 +97,20 @@ class OpenAIProvider(BaseLLMProvider):  # pragma: no cover
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        options: dict[str, Any] = {}
+        if generation is not None:
+            if generation.temperature is not None:
+                options["temperature"] = generation.temperature
+            if generation.max_tokens is not None:
+                options["max_completion_tokens"] = generation.max_tokens
+            if generation.seed is not None:
+                options["seed"] = generation.seed
+
         t0 = time.monotonic()
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
+            **options,
         )
         latency_ms = (time.monotonic() - t0) * 1000
 
