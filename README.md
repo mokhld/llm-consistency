@@ -4,7 +4,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-95.15%25-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-97%25-brightgreen.svg)]()
 [![Type Checked](https://img.shields.io/badge/mypy-strict-blue.svg)]()
 
 llm-consistency implements the [CAT framework](https://arxiv.org/abs/2512.23711) (Cavalin et al., 2025) for evaluating LLM robustness under controlled input variations. It automates the full pipeline: load a dataset, apply deterministic perturbations (option reorder, format change, separator change), query any LLM provider, score responses, and compute paper-faithful MCA, CAR, and CORE metrics — all from a single CLI command or Python API call.
