@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing_extensions import override
 
 from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
+from llm_consistency.providers._budget import CostPerToken
 from llm_consistency.types import LLMResponse
 
 
@@ -59,6 +60,8 @@ class MockLLMProvider(BaseLLMProvider):
         default_response: str = "A",
         **kwargs: object,
     ) -> None:
+        # The mock is free, so a budget never needs a price from the table.
+        kwargs.setdefault("pricing", CostPerToken(0.0, 0.0))
         super().__init__(model=model, **kwargs)  # type: ignore[arg-type]
         self._response_map: dict[str, str] | None = (
             responses if isinstance(responses, dict) else None

@@ -9,7 +9,9 @@ import pytest
 
 import llm_consistency
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
+from llm_consistency.scoring import get_scorer
 from llm_consistency.types import (
+    KNOWN_SCORERS,
     EvaluationConfig,
     EvaluationReport,
     LLMResponse,
@@ -19,6 +21,7 @@ from llm_consistency.types import (
     PairedTestResult,
     PerturbationType,
     PerturbedVariant,
+    PresentedOption,
     QuestionConsistencyResult,
     ScoredResponse,
 )
@@ -361,6 +364,58 @@ class TestPerturbedVariant:
         restored = PerturbedVariant.from_dict(json.loads(json.dumps(v.to_dict())))
         assert v == restored
         assert restored.options is None
+
+    def test_perturbed_variant_presented_options_round_trip(self) -> None:
+        """presented_options, including original labels, round-trips."""
+        presented = (
+            PresentedOption(
+                label="1", text="London", is_correct=False, original_label="B"
+            ),
+            PresentedOption(
+                label="2", text="Paris", is_correct=True, original_label="A"
+            ),
+        )
+        v = PerturbedVariant(
+            original_question_id="q1",
+            perturbation_type=PerturbationType.FORMAT_CHANGE,
+            seed=42,
+            variant_index=0,
+            stem="Capital of France?\n1. London\n2. Paris",
+            presented_options=presented,
+        )
+        d = json.loads(json.dumps(v.to_dict()))
+        assert d["presented_options"][1] == {
+            "label": "2",
+            "text": "Paris",
+            "is_correct": True,
+            "original_label": "A",
+        }
+        restored = PerturbedVariant.from_dict(d)
+        assert restored == v
+        assert restored.presented_options == presented
+
+    def test_perturbed_variant_legacy_dict_without_presented_options(self) -> None:
+        """Dicts written before presented_options existed still load."""
+        v = PerturbedVariant.from_dict(
+            {
+                "original_question_id": "q1",
+                "perturbation_type": "SEPARATOR_CHANGE",
+                "seed": 1,
+                "variant_index": 0,
+                "stem": "?",
+                "options": None,
+            }
+        )
+        assert v.presented_options is None
+
+    def test_presented_option_is_an_mc_option(self) -> None:
+        """PresentedOption can be used wherever an MCOption is expected."""
+        opt = PresentedOption(
+            label="C", text="Paris", is_correct=True, original_label="A"
+        )
+        assert isinstance(opt, MCOption)
+        question = MCQuestion(id="q", stem="?", options=(opt,))
+        assert question.options[0].original_label == "A"  # type: ignore[attr-defined]
 
 
 # --- LLMResponse tests ---
@@ -774,6 +829,78 @@ class TestQuestionConsistencyResult:
         assert len(restored.scored_responses) == 2
         assert restored.scored_responses[0].is_correct is True
 
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"total_variants": 0, "correct_count": 0}, "total_variants"),
+            ({"correct_count": 6}, "correct_count"),
+            ({"correct_count": -1}, "correct_count"),
+            ({"rc_correct": 1.5}, "rc_correct"),
+            ({"rc_correct": -0.1}, "rc_correct"),
+            ({"rc_correct": float("nan")}, "rc_correct"),
+            ({"rc_agree": 1.01}, "rc_agree"),
+            ({"rc_agree": float("nan")}, "rc_agree"),
+        ],
+    )
+    def test_question_consistency_result_rejects_invalid(
+        self, overrides: dict[str, float], match: str
+    ) -> None:
+        """Out-of-range counts and rates raise ValidationError."""
+        fields: dict[str, object] = {
+            "question_id": "q1",
+            "rc_correct": 0.8,
+            "rc_agree": 0.6,
+            "total_variants": 5,
+            "correct_count": 4,
+        }
+        fields.update(overrides)
+        with pytest.raises(ValidationError, match=match):
+            QuestionConsistencyResult(**fields)  # type: ignore[arg-type]
+
+    def test_question_consistency_result_accepts_bounds(self) -> None:
+        """0 and 1 are valid rates; correct_count may be 0 or total_variants."""
+        QuestionConsistencyResult(
+            question_id="q1",
+            rc_correct=1.0,
+            rc_agree=1.0,
+            total_variants=1,
+            correct_count=1,
+        )
+        QuestionConsistencyResult(
+            question_id="q2",
+            rc_correct=0.0,
+            rc_agree=0.0,
+            total_variants=1,
+            correct_count=0,
+        )
+
+    def test_question_consistency_result_from_dict_existing_report(self) -> None:
+        """A QCR dict as written by earlier versions still loads."""
+        qcr = QuestionConsistencyResult.from_dict(
+            {
+                "question_id": "q1",
+                "rc_correct": 0.25,
+                "rc_agree": 0.5,
+                "total_variants": 4,
+                "correct_count": 1,
+                "answer_distribution": {"A": 2, "B": 1, "<error:q1_v3>": 1},
+                "scored_responses": [],
+            }
+        )
+        assert qcr.correct_count == 1
+
+    def test_question_consistency_result_from_dict_rejects_invalid(self) -> None:
+        with pytest.raises(ValidationError, match="total_variants"):
+            QuestionConsistencyResult.from_dict(
+                {
+                    "question_id": "q1",
+                    "rc_correct": 0.0,
+                    "rc_agree": 0.0,
+                    "total_variants": 0,
+                    "correct_count": 0,
+                }
+            )
+
 
 # --- EvaluationConfig tests ---
 
@@ -815,8 +942,8 @@ class TestEvaluationConfig:
         )
 
     def test_evaluation_config_valid_scorers_accepted(self) -> None:
-        """All three known scorers are accepted without error."""
-        for scorer_name in ("exact_match", "semantic_similarity", "llm_judge"):
+        """Every name in KNOWN_SCORERS is accepted and resolvable by get_scorer."""
+        for scorer_name in KNOWN_SCORERS:
             cfg = EvaluationConfig(
                 model="gpt-4o",
                 provider="openai",
@@ -824,6 +951,18 @@ class TestEvaluationConfig:
                 scorer=scorer_name,
             )
             assert cfg.scorer == scorer_name
+            assert get_scorer(scorer_name) is not None
+
+    def test_evaluation_config_rejects_unimplemented_scorers(self) -> None:
+        """Scorers get_scorer cannot build are rejected at config time."""
+        for scorer_name in ("semantic_similarity", "llm_judge"):
+            with pytest.raises(ValidationError, match=scorer_name):
+                EvaluationConfig(
+                    model="gpt-4o",
+                    provider="openai",
+                    perturbation_types=(PerturbationType.OPTION_REORDER,),
+                    scorer=scorer_name,
+                )
 
     def test_evaluation_config_empty_perturbation_types(self) -> None:
         """Empty perturbation_types tuple raises ValidationError."""
@@ -877,8 +1016,46 @@ class TestEvaluationConfig:
         assert cfg.concurrency == 10
         assert cfg.max_budget_usd is None
         assert cfg.mca_threshold == 1.0
+        assert cfg.min_mca == 1.0
         assert cfg.core_threshold is None
         assert cfg.ci_mode is False
+
+    def test_evaluation_config_min_mca_round_trip(self) -> None:
+        """min_mca is serialized and restored."""
+        cfg = EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(PerturbationType.OPTION_REORDER,),
+            scorer="exact_match",
+            mca_threshold=0.8,
+            min_mca=0.9,
+        )
+        d = cfg.to_dict()
+        assert d["min_mca"] == 0.9
+        assert EvaluationConfig.from_dict(json.loads(json.dumps(d))) == cfg
+
+    def test_evaluation_config_from_dict_without_min_mca_defaults(self) -> None:
+        """Payloads written before min_mca existed load with min_mca=1.0."""
+        d = EvaluationConfig(
+            model="gpt-4o",
+            provider="openai",
+            perturbation_types=(PerturbationType.OPTION_REORDER,),
+            scorer="exact_match",
+        ).to_dict()
+        del d["min_mca"]
+        assert EvaluationConfig.from_dict(d).min_mca == 1.0
+
+    def test_evaluation_config_min_mca_out_of_range_rejected(self) -> None:
+        """min_mca outside [0.0, 1.0] raises ValidationError."""
+        for bad in (-0.1, 1.5):
+            with pytest.raises(ValidationError, match="min_mca"):
+                EvaluationConfig(
+                    model="gpt-4o",
+                    provider="openai",
+                    perturbation_types=(PerturbationType.OPTION_REORDER,),
+                    scorer="exact_match",
+                    min_mca=bad,
+                )
 
     def test_evaluation_config_empty_model_rejected(self) -> None:
         """Empty model string raises ValidationError."""

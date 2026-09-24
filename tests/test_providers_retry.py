@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from llm_consistency.providers._retry import retry_with_backoff
+from llm_consistency.providers._retry import (
+    is_retryable_status,
+    parse_retry_after,
+    retry_with_backoff,
+)
 
 _RETRY_MOD = "llm_consistency.providers._retry"
 
@@ -200,3 +204,106 @@ class TestRetryWithBackoff:
             )
         assert result == "done"
         assert call_count == 3
+
+    async def test_is_retryable_predicate_triggers_retry(self) -> None:
+        call_count = 0
+
+        async def factory() -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise KeyError("transient")
+            return "ok"
+
+        with patch(f"{_RETRY_MOD}.asyncio.sleep", new_callable=AsyncMock):
+            result = await retry_with_backoff(
+                factory,
+                is_retryable=lambda exc: isinstance(exc, KeyError),
+            )
+        assert result == "ok"
+        assert call_count == 2
+
+    async def test_is_retryable_false_raises_immediately(self) -> None:
+        factory = AsyncMock(side_effect=KeyError("permanent"))
+        with pytest.raises(KeyError):
+            await retry_with_backoff(factory, is_retryable=lambda exc: False)
+        factory.assert_called_once()
+
+    async def test_retry_after_replaces_backoff_delay(self) -> None:
+        factory = AsyncMock(side_effect=[ValueError("429"), "ok"])
+        with patch(f"{_RETRY_MOD}.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            await retry_with_backoff(
+                factory,
+                base_delay=10.0,
+                jitter=5.0,
+                retryable_exceptions=(ValueError,),
+                retry_after=lambda exc: 0.5,
+            )
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_retry_after_capped_at_max_delay(self) -> None:
+        factory = AsyncMock(side_effect=[ValueError("429"), "ok"])
+        with patch(f"{_RETRY_MOD}.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            await retry_with_backoff(
+                factory,
+                max_delay=3.0,
+                retryable_exceptions=(ValueError,),
+                retry_after=lambda exc: 90.0,
+            )
+        sleep.assert_awaited_once_with(3.0)
+
+    async def test_retry_after_none_falls_back_to_backoff(self) -> None:
+        factory = AsyncMock(side_effect=[ValueError("503"), "ok"])
+        with (
+            patch(f"{_RETRY_MOD}.asyncio.sleep", new_callable=AsyncMock) as sleep,
+            patch(f"{_RETRY_MOD}.random.uniform", return_value=0.0),
+        ):
+            await retry_with_backoff(
+                factory,
+                base_delay=2.0,
+                retryable_exceptions=(ValueError,),
+                retry_after=lambda exc: None,
+            )
+        sleep.assert_awaited_once_with(2.0)
+
+
+class TestIsRetryableStatus:
+    @pytest.mark.parametrize("status", [408, 409, 429, 500, 502, 503, 504, 529])
+    def test_transient_statuses_retry(self, status: int) -> None:
+        assert is_retryable_status(status)
+
+    @pytest.mark.parametrize("status", [200, 400, 401, 403, 404, 413, 422, -1])
+    def test_permanent_statuses_do_not_retry(self, status: int) -> None:
+        assert not is_retryable_status(status)
+
+    @pytest.mark.parametrize("status", [None, "429"])
+    def test_non_int_does_not_retry(self, status: object) -> None:
+        assert not is_retryable_status(status)
+
+
+class TestParseRetryAfter:
+    def test_none_headers(self) -> None:
+        assert parse_retry_after(None) is None
+
+    def test_missing_header(self) -> None:
+        assert parse_retry_after({"content-type": "application/json"}) is None
+
+    def test_seconds(self) -> None:
+        assert parse_retry_after({"retry-after": "2"}) == 2.0
+
+    def test_fractional_seconds(self) -> None:
+        assert parse_retry_after({"retry-after": "0.5"}) == 0.5
+
+    def test_milliseconds_take_precedence(self) -> None:
+        headers = {"retry-after-ms": "250", "retry-after": "9"}
+        assert parse_retry_after(headers) == pytest.approx(0.25)
+
+    def test_bad_milliseconds_fall_back_to_seconds(self) -> None:
+        headers = {"retry-after-ms": "soon", "retry-after": "3"}
+        assert parse_retry_after(headers) == 3.0
+
+    @pytest.mark.parametrize(
+        "value", ["Wed, 21 Oct 2026 07:28:00 GMT", "-1", "nan", "inf"]
+    )
+    def test_unusable_values(self, value: str) -> None:
+        assert parse_retry_after({"retry-after": value}) is None

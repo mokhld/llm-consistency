@@ -37,7 +37,9 @@ class BaseScorer(ABC):
 
         Args:
             response: The raw LLM response to score.
-            question: The original question (provides correct answer).
+            question: The question as the model saw it: the runners pass
+                the variant's presented options, so the labels match the
+                prompt (provides the valid labels and the correct answer).
 
         Returns:
             A ScoredResponse with is_correct, score, and scoring_method.
@@ -65,6 +67,29 @@ def _get_correct_label(question: MCQuestion) -> str:
     raise ValueError(msg)  # pragma: no cover
 
 
+# Text just before a label that negates it, as in "not A" or "isn't (B)".
+_NEGATION_BEFORE = re.compile(r"(?:\bnot|n't)\s*\(?$", re.IGNORECASE)
+
+# The next word after an "A" or "I" that starts a sentence.
+_NEXT_WORD = re.compile(r"[ \t]+([a-z]+)")
+
+
+def _reads_as_word(text: str, match: re.Match[str]) -> bool:
+    """Return True when a matched "A" or "I" is the English word, not a label.
+
+    That is the case when it starts a sentence and a lowercase word follows,
+    as in "A good choice is C" or "I think B".  "is" and "was" do not count,
+    because "A is correct" names the option.
+    """
+    if match.group(1) not in ("A", "I"):
+        return False
+    before = text[: match.start()].rstrip(" \t")
+    if before and before[-1] not in ".!?\n":
+        return False
+    next_word = _NEXT_WORD.match(text, match.end())
+    return next_word is not None and next_word.group(1) not in ("is", "was")
+
+
 def _extract_mc_answer(
     raw_output: str,
     valid_labels: frozenset[str],
@@ -72,45 +97,65 @@ def _extract_mc_answer(
     """Extract an MC answer label from raw LLM output.
 
     Tries patterns from most-specific to least-specific:
-    1. ``"Answer: X"`` or ``"answer: (X)"`` format
-    2. ``"The answer is X"`` or ``"the answer is (X)"`` format
-    3. First valid label appearing as a standalone word
-    4. Single-character output after stripping whitespace
+    1. ``"Answer: X"`` / ``"answer: (X)"`` or ``"The answer is X"``
+       format; the last such statement in the text wins
+    2. First valid label appearing as a standalone word
+    3. Single-character output after stripping whitespace
+
+    Labels must match case-sensitively and end at a word boundary, so
+    "Answer: Definitely C" does not read the "D" of "Definitely".  The one
+    exception is strategy 3: an output that is a single character matches
+    a label in either case.  Numeric labels such as ``"2"`` work the same
+    way as letters.
+
+    Strategy 1 takes the last match because a model that revises itself
+    states its final answer last.  Strategy 2 keeps the first label,
+    but skips labels directly negated ("not A", "isn't A"), so "The answer
+    is not A, it is C." gives C.  It also skips a sentence-initial "A" or
+    "I" used as a word ("A good choice here is C." gives C) unless no
+    other label is found.
 
     Args:
         raw_output: The complete raw text from the LLM.
         valid_labels: Set of acceptable answer labels
-            (e.g., ``{"A", "B", "C", "D"}``).
+            (e.g., ``{"A", "B", "C", "D"}`` or ``{"1", "2", "3", "4"}``).
 
     Returns:
-        The extracted label in uppercase, or ``None`` if no valid
-        answer found.
+        The extracted label as spelled in *valid_labels*, or ``None`` if
+        no valid answer found.
     """
     # Minimal normalization: strip whitespace and markdown bold markers
     text = raw_output.strip().replace("**", "")
-    labels_alt = "|".join(sorted(valid_labels))
+    # Longest first, so "10" is tried before "1".
+    labels_alt = "|".join(
+        re.escape(label) for label in sorted(valid_labels, key=len, reverse=True)
+    )
 
-    # Strategy 1: "Answer: X" pattern (with optional parens, colon variants)
-    pattern1 = rf"[Aa]nswer\s*[:]\s*\(?({labels_alt})\)?"
-    match = re.search(pattern1, text, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
+    # Strategy 1: the last "Answer: X" or "The answer is X" statement
+    stated = list(
+        re.finditer(
+            rf"(?i:answer\s*:|the\s+answer\s+is)\s*\(?({labels_alt})\b",
+            text,
+        )
+    )
+    if stated:
+        return stated[-1].group(1)
 
-    # Strategy 2: "The answer is X" pattern
-    pattern2 = rf"[Tt]he\s+answer\s+is\s*\(?({labels_alt})\)?"
-    match = re.search(pattern2, text, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
+    # Strategy 2: First standalone valid label (word boundary)
+    word_like: list[str] = []
+    for match in re.finditer(rf"\b({labels_alt})\b", text):
+        if _NEGATION_BEFORE.search(text, 0, match.start()):
+            continue
+        if _reads_as_word(text, match):
+            word_like.append(match.group(1))
+            continue
+        return match.group(1)
+    if word_like:
+        return word_like[0]
 
-    # Strategy 3: First standalone valid label (word boundary)
-    pattern3 = rf"\b({labels_alt})\b"
-    match = re.search(pattern3, text)
-    if match:
-        return match.group(1).upper()
-
-    # Strategy 4: Single character after stripping
-    if len(text) == 1 and text.upper() in valid_labels:
-        return text.upper()
+    # Strategy 3: Single character after stripping, in either case
+    if len(text) == 1:
+        return next((lab for lab in valid_labels if lab.lower() == text.lower()), None)
 
     return None
 
@@ -122,10 +167,10 @@ class ExactMatchScorer(BaseScorer):
     label from the raw LLM output, then compares it against the
     correct option label from the question.
 
-    Extraction strategies (tried in order):
+    Extraction strategies (tried in order, see :func:`_extract_mc_answer`):
     1. ``"Answer: X"`` format
     2. ``"The answer is X"`` format
-    3. First standalone valid label
+    3. First standalone valid label that is not negated
     4. Single-character output
     """
 
@@ -147,8 +192,8 @@ class ExactMatchScorer(BaseScorer):
 
         Args:
             response: The raw LLM response to score.
-            question: The original MC question (provides valid labels
-                and the correct answer).
+            question: The MC question as presented to the model
+                (provides valid labels and the correct answer).
 
         Returns:
             A ScoredResponse with ``is_correct=True`` and ``score=1.0``

@@ -12,7 +12,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from llm_consistency.providers._base import _RawResponse
+from llm_consistency.providers._base import EmptyResponseError, _RawResponse
+
+
+@pytest.fixture(autouse=True)
+def _stub_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for openai, whose exception bases LiteLLMProvider imports."""
+    stub = types.ModuleType("openai")
+    stub.APIError = type("APIError", (Exception,), {})  # type: ignore[attr-defined]
+    stub.APIConnectionError = type(  # type: ignore[attr-defined]
+        "APIConnectionError", (stub.APIError,), {}
+    )
+    monkeypatch.setitem(sys.modules, "openai", stub)
 
 
 def _import_litellm_provider() -> type:
@@ -26,10 +37,12 @@ def _import_litellm_provider() -> type:
 # ---------------------------------------------------------------------------
 def _make_mock_litellm_module(
     *,
-    content: str = "The answer is A",
+    content: str | None = "The answer is A",
     prompt_tokens: int | None = 20,
     completion_tokens: int | None = 10,
     has_usage: bool = True,
+    provider_specific_fields: dict[str, str] | None = None,
+    finish_reason: str = "stop",
 ) -> tuple[types.ModuleType, AsyncMock]:
     """Return (mock_module, mock_acompletion)."""
     mock_module = types.ModuleType("litellm")
@@ -37,9 +50,11 @@ def _make_mock_litellm_module(
     # Build mock response in OpenAI-compatible format
     mock_message = MagicMock()
     mock_message.content = content
+    mock_message.provider_specific_fields = provider_specific_fields
 
     mock_choice = MagicMock()
     mock_choice.message = mock_message
+    mock_choice.finish_reason = finish_reason
 
     mock_response = MagicMock()
     mock_response.choices = [mock_choice]
@@ -208,3 +223,32 @@ class TestLiteLLMSendRequest:
             raw = await provider._send_request("prompt")
             assert isinstance(raw.latency_ms, float)
             assert raw.latency_ms >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_refusal_returned_as_content(self) -> None:
+        """LiteLLM carries an OpenAI refusal in provider_specific_fields."""
+        mock_module, _ = _make_mock_litellm_module(
+            content=None,
+            provider_specific_fields={"refusal": "I can't help with that."},
+        )
+        with patch.dict(sys.modules, {"litellm": mock_module}):
+            cls = _import_litellm_provider()
+            provider = cls(model="openai/gpt-4o")
+            raw = await provider._send_request("prompt")
+            assert raw.content == "I can't help with that."
+
+    @pytest.mark.asyncio
+    async def test_truncated_before_text_raises(self) -> None:
+        mock_module, _ = _make_mock_litellm_module(
+            content="",
+            finish_reason="length",
+            prompt_tokens=12,
+            completion_tokens=256,
+        )
+        with patch.dict(sys.modules, {"litellm": mock_module}):
+            cls = _import_litellm_provider()
+            provider = cls(model="openai/gpt-4o")
+            with pytest.raises(EmptyResponseError) as exc:
+                await provider._send_request("prompt")
+            assert exc.value.prompt_tokens == 12
+            assert exc.value.completion_tokens == 256

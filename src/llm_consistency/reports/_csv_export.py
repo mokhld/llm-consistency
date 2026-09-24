@@ -34,6 +34,21 @@ _CSV_FIELDS = (
     "answer_distribution",
 )
 
+# Leading characters that make spreadsheet apps treat a cell as a formula.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(text: str) -> str:
+    """Neutralise spreadsheet formula injection in a text cell.
+
+    Question IDs and answer labels can come from datasets or model
+    output. A cell that starts with a formula character is prefixed
+    with a single quote so spreadsheet apps show it as text.
+    """
+    if text.startswith(_FORMULA_PREFIXES):
+        return "'" + text
+    return text
+
 
 def export_csv(report: EvaluationReport, path: Path) -> None:
     """Export a report's per-question results as CSV (UTF-8, atomic).
@@ -42,6 +57,9 @@ def export_csv(report: EvaluationReport, path: Path) -> None:
     ``total_variants``, ``correct_count``, ``answer_distribution``
     (the last is rendered as a ``"label=count; label=count"`` string
     so the file stays a flat table that opens cleanly in spreadsheets).
+    Text cells that start with ``=``, ``+``, ``-``, ``@``, a tab or a
+    carriage return are prefixed with ``'`` so spreadsheet apps do not
+    evaluate them as formulas.
     """
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
@@ -53,12 +71,12 @@ def export_csv(report: EvaluationReport, path: Path) -> None:
         )
         writer.writerow(
             [
-                qcr.question_id,
+                _safe_cell(qcr.question_id),
                 f"{qcr.rc_correct:.6f}",
                 f"{qcr.rc_agree:.6f}",
                 qcr.total_variants,
                 qcr.correct_count,
-                dist,
+                _safe_cell(dist),
             ]
         )
 

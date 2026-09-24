@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING
 
 from llm_consistency._exceptions import ValidationError
 from llm_consistency.datasets._base import BaseDataset
-from llm_consistency.datasets._validation import detect_format, validate_unique_ids
+from llm_consistency.datasets._validation import (
+    detect_format,
+    load_json_questions,
+    validate_unique_ids,
+)
 from llm_consistency.types import OpenEndedQuestion
 
 if TYPE_CHECKING:
@@ -62,9 +66,7 @@ class OpenEndedDataset(BaseDataset):
     @classmethod
     def _load_json(cls, path: Path) -> tuple[OpenEndedQuestion, ...]:
         """Load from JSON format: ``{"questions": [...]}``."""
-        with path.open() as f:
-            data = json.load(f)
-        raw_questions: list[dict[str, Any]] = data["questions"]
+        raw_questions: list[dict[str, Any]] = load_json_questions(path)
         results: list[OpenEndedQuestion] = []
         for idx, qdict in enumerate(raw_questions):
             results.append(cls._parse_question(qdict, str(path), idx))
@@ -74,7 +76,7 @@ class OpenEndedDataset(BaseDataset):
     def _load_jsonl(cls, path: Path) -> tuple[OpenEndedQuestion, ...]:
         """Load from JSONL format: one question per line."""
         results: list[OpenEndedQuestion] = []
-        with path.open() as f:
+        with path.open(encoding="utf-8-sig") as f:
             for line_num, line in enumerate(f, start=1):
                 stripped = line.strip()
                 if not stripped:
@@ -91,7 +93,7 @@ class OpenEndedDataset(BaseDataset):
     def _load_csv(cls, path: Path) -> tuple[OpenEndedQuestion, ...]:
         """Load from CSV with pipe-delimited reference_answers."""
         results: list[OpenEndedQuestion] = []
-        with path.open(newline="") as f:
+        with path.open(newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row_idx, row in enumerate(reader, start=2):
                 qid = row.get("id", "").strip()

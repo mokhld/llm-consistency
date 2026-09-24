@@ -107,6 +107,24 @@ class TestFactoryRegistration:
         provider = get_provider("mock", model="mock")
         assert isinstance(provider, MockLLMProvider)
 
+    def test_get_provider_mock_with_budget_and_rpm(self) -> None:
+        """The CLI forwards these kwargs; the mock is free, so any budget works."""
+        provider = get_provider(
+            "mock", model="mock", max_budget_usd=0.01, requests_per_minute=120
+        )
+        assert isinstance(provider, MockLLMProvider)
+
+
+class TestBudget:
+    """The mock bypasses the budget entirely."""
+
+    @pytest.mark.asyncio
+    async def test_tiny_budget_never_trips(self) -> None:
+        provider = MockLLMProvider(model="mock", max_budget_usd=1e-9)
+        for i in range(5):
+            response = await provider.query("prompt", f"q{i}")
+            assert response.raw_output == "A"
+
 
 class TestQueryBatch:
     """Batch query support."""

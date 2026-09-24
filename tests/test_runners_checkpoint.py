@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -10,6 +12,7 @@ import pytest
 from llm_consistency._exceptions import ValidationError
 from llm_consistency.runners._checkpoint import (
     CHECKPOINT_VERSION,
+    CONFIG_HASH_FIELDS,
     CheckpointHeader,
     CheckpointWriter,
     compute_config_hash,
@@ -86,6 +89,29 @@ class TestComputeConfigHash:
         a = _make_config(perturbation=PerturbationType.OPTION_REORDER)
         b = _make_config(perturbation=PerturbationType.FORMAT_CHANGE)
         assert compute_config_hash(a, 42) != compute_config_hash(b, 42)
+
+    @pytest.mark.parametrize(
+        ("field", "value"), [("model", "other-model"), ("provider", "openai")]
+    )
+    def test_changes_with_model_and_provider(self, field: str, value: str) -> None:
+        config = _make_config()
+        changed = dataclasses.replace(config, **{field: value})
+        assert compute_config_hash(config, 42) != compute_config_hash(changed, 42)
+
+    def test_ignores_fields_that_do_not_change_results(self) -> None:
+        config = _make_config()
+        changed = dataclasses.replace(
+            config,
+            concurrency=8,
+            max_budget_usd=5.0,
+            mca_threshold=0.5,
+            core_threshold=0.3,
+            ci_mode=True,
+        )
+        assert compute_config_hash(config, 42) == compute_config_hash(changed, 42)
+
+    def test_hash_fields_are_config_keys(self) -> None:
+        assert set(CONFIG_HASH_FIELDS) <= set(_make_config().to_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +195,62 @@ class TestCheckpointWriter:
         writer = CheckpointWriter(tmp_path / "ckpt.jsonl", config=config, seed=42)
         with pytest.raises(RuntimeError, match="outside of its context manager"):
             writer.append(_make_qcr("q1"))
+
+    def test_crash_resume_crash_resume(self, tmp_path: Path) -> None:
+        """Two crashes mid-write in a row leave a readable checkpoint."""
+        config = _make_config()
+        path = tmp_path / "ckpt.jsonl"
+        partial = '{"type":"qcr","qcr":{"question_id":"q'
+
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q1"))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(partial)  # crash while writing q2
+
+        _, results = read_checkpoint(path, config=config, seed=42)
+        assert [r.question_id for r in results] == ["q1"]
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q2"))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(partial)  # crash while writing q3
+
+        _, results = read_checkpoint(path, config=config, seed=42)
+        assert [r.question_id for r in results] == ["q1", "q2"]
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q3"))
+
+        _, results = read_checkpoint(path, config=config, seed=42)
+        assert [r.question_id for r in results] == ["q1", "q2", "q3"]
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 4
+        assert all(json.loads(line) for line in lines)
+
+    def test_complete_record_missing_newline_is_kept(self, tmp_path: Path) -> None:
+        """A crash between a record and its newline keeps the record."""
+        config = _make_config()
+        path = tmp_path / "ckpt.jsonl"
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q1"))
+        path.write_text(path.read_text(encoding="utf-8").rstrip("\n"), "utf-8")
+
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q2"))
+
+        _, results = read_checkpoint(path, config=config, seed=42)
+        assert [r.question_id for r in results] == ["q1", "q2"]
+
+    def test_resume_with_non_result_fields_changed(self, tmp_path: Path) -> None:
+        config = _make_config()
+        path = tmp_path / "ckpt.jsonl"
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q1"))
+
+        resumed = dataclasses.replace(config, concurrency=16, max_budget_usd=9.0)
+        with CheckpointWriter(path, config=resumed, seed=42) as writer:
+            writer.append(_make_qcr("q2"))
+
+        _, results = read_checkpoint(path, config=resumed, seed=42)
+        assert [r.question_id for r in results] == ["q1", "q2"]
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +398,113 @@ class TestReadCheckpoint:
 
         with pytest.raises(ValidationError, match="'qcr' field missing"):
             read_checkpoint(path, config=config, seed=42)
+
+    def test_duplicate_records_last_one_wins(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        config = _make_config()
+        path = tmp_path / "ckpt.jsonl"
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            writer.append(_make_qcr("q1", rc_correct=0.0))
+            writer.append(_make_qcr("q2"))
+            writer.append(_make_qcr("q1", rc_correct=1.0))
+
+        with caplog.at_level("WARNING", logger="llm_consistency.runners._checkpoint"):
+            _, results = read_checkpoint(path, config=config, seed=42)
+
+        assert [(r.question_id, r.rc_correct) for r in results] == [
+            ("q1", 1.0),
+            ("q2", 1.0),
+        ]
+        assert any("duplicate" in rec.message for rec in caplog.records)
+
+    def test_question_ids_drops_results_not_in_dataset(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        config = _make_config()
+        path = tmp_path / "ckpt.jsonl"
+        with CheckpointWriter(path, config=config, seed=42) as writer:
+            for qid in ("q1", "q2", "q3"):
+                writer.append(_make_qcr(qid))
+
+        with caplog.at_level("WARNING", logger="llm_consistency.runners._checkpoint"):
+            _, results = read_checkpoint(
+                path, config=config, seed=42, question_ids={"q1", "q3", "q4"}
+            )
+
+        assert [r.question_id for r in results] == ["q1", "q3"]
+        assert any("not in the dataset" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoints written before the hash allow-list
+# ---------------------------------------------------------------------------
+
+
+def _write_legacy_checkpoint(
+    path: Path, snapshot: dict[str, object], config_hash: str | None = None
+) -> None:
+    """Write a checkpoint whose hash covers the whole config snapshot."""
+    if config_hash is None:
+        blob = json.dumps(
+            {"config": snapshot, "seed": 42}, sort_keys=True, separators=(",", ":")
+        )
+        config_hash = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    header = {
+        "type": "header",
+        "version": 1,
+        "config_hash": config_hash,
+        "created_at": "2026-09-01T00:00:00+00:00",
+        "package_version": "0.3.0",
+        "python_version": "3.12.0",
+        "seed": 42,
+        "config_snapshot": snapshot,
+    }
+    record = {"type": "qcr", "qcr": _make_qcr("q1").to_dict()}
+    path.write_text(
+        json.dumps(header) + "\n" + json.dumps(record) + "\n", encoding="utf-8"
+    )
+
+
+def _legacy_snapshot(num_variants: int = 3) -> dict[str, object]:
+    """``EvaluationConfig.to_dict()`` as it was before the allow-list."""
+    return {
+        "model": "mock",
+        "provider": "mock",
+        "perturbation_types": ["OPTION_REORDER"],
+        "scorer": "exact_match",
+        "num_variants": num_variants,
+        "concurrency": 2,
+        "max_budget_usd": None,
+        "mca_threshold": 1.0,
+        "core_threshold": None,
+        "ci_mode": False,
+    }
+
+
+class TestOlderVersionRejected:
+    """Version 1 checkpoints hold results scored with the pre-1.1 labels."""
+
+    def test_version_1_checkpoint_is_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "ckpt.jsonl"
+        _write_legacy_checkpoint(path, _legacy_snapshot())
+
+        with pytest.raises(ValidationError, match="older release"):
+            read_checkpoint(path, config=_make_config(), seed=42)
+
+    def test_writer_refuses_to_append_to_version_1(self, tmp_path: Path) -> None:
+        path = tmp_path / "ckpt.jsonl"
+        _write_legacy_checkpoint(path, _legacy_snapshot())
+
+        with (
+            pytest.raises(ValidationError, match="older release"),
+            CheckpointWriter(path, config=_make_config(), seed=42),
+        ):
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import itertools
+import time
 
 import pytest
 
@@ -12,6 +14,7 @@ from llm_consistency.perturbations import (
     OptionReorderPerturbation,
     SeparatorChangePerturbation,
     _reset_registry,
+    _sample_permutations,
     get,
     list_registered,
     register,
@@ -396,6 +399,75 @@ class TestOptionReorderEdgeCases:
         assert len(variants) == 1
 
 
+def _ten_option_question() -> MCQuestion:
+    return MCQuestion(
+        id="q-ten",
+        stem="Pick one.",
+        options=tuple(
+            MCOption(label=lab, text=f"text {lab}", is_correct=lab == "C")
+            for lab in "ABCDEFGHIJ"
+        ),
+    )
+
+
+class TestOptionReorderPresentedOptions:
+    """presented_options maps each shown label back to the original option."""
+
+    def test_presented_options_match_options(self, sample_question: MCQuestion) -> None:
+        variants = OptionReorderPerturbation().generate_variants(sample_question)
+        by_label = {o.label: o for o in sample_question.options}
+        for v in variants:
+            assert v.options is not None
+            assert v.presented_options is not None
+            for shown, presented in zip(v.options, v.presented_options, strict=True):
+                assert presented.label == shown.label
+                assert presented.text == shown.text
+                assert presented.is_correct == shown.is_correct
+                original = by_label[presented.original_label]
+                assert original.text == presented.text
+                assert original.is_correct == presented.is_correct
+
+
+class TestOptionReorderManyOptions:
+    """Many options are sampled without enumerating every permutation (A10)."""
+
+    def test_ten_options_is_fast_and_distinct(self) -> None:
+        question = _ten_option_question()
+        start = time.perf_counter()
+        variants = OptionReorderPerturbation().generate_variants(question, seed=42, n=5)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 0.05
+        assert len(variants) == 5
+        orders = [tuple(o.text for o in v.options or ()) for v in variants]
+        assert len(set(orders)) == 5
+        assert tuple(o.text for o in question.options) not in orders
+
+    def test_ten_options_seeded(self) -> None:
+        question = _ten_option_question()
+        pert = OptionReorderPerturbation()
+        a = pert.generate_variants(question, seed=7, n=5)
+        assert a == pert.generate_variants(question, seed=7, n=5)
+        assert a != pert.generate_variants(question, seed=8, n=5)
+
+    def test_sampler_rejects_identity_and_repeats(self) -> None:
+        """Asking for every non-identity ordering of 3 options returns each once."""
+        perms = _sample_permutations(3, 5, seed=0)
+        assert sorted(perms) == sorted(
+            p for p in itertools.permutations(range(3)) if p != (0, 1, 2)
+        )
+
+    def test_ten_options_correct_follows_text(self) -> None:
+        variants = OptionReorderPerturbation().generate_variants(
+            _ten_option_question(), seed=1, n=20
+        )
+        for v in variants:
+            assert v.presented_options is not None
+            (correct,) = [o for o in v.presented_options if o.is_correct]
+            assert correct.text == "text C"
+            assert correct.original_label == "C"
+
+
 # ---------------------------------------------------------------------------
 # FormatChangePerturbation tests
 # ---------------------------------------------------------------------------
@@ -488,6 +560,49 @@ class TestFormatChangeMetadata:
             assert v.seed == seed
             assert v.variant_index == i
             assert v.options is None
+
+
+class TestFormatChangePresentedOptions:
+    """Each template declares the labels it shows."""
+
+    def test_labels_shown_in_stem(self, sample_question: MCQuestion) -> None:
+        variants = FormatChangePerturbation().generate_variants(sample_question)
+        for v in variants:
+            assert v.presented_options is not None
+            assert [o.original_label for o in v.presented_options] == list("ABCD")
+            assert [o.text for o in v.presented_options] == [
+                o.text for o in sample_question.options
+            ]
+            for o in v.presented_options:
+                assert o.label in v.stem
+
+    def test_numbered_template_uses_numbers(self, sample_question: MCQuestion) -> None:
+        variants = FormatChangePerturbation().generate_variants(sample_question)
+        numbered = [v for v in variants if "\n1. Paris" in v.stem]
+        assert len(numbered) == 1
+        presented = numbered[0].presented_options
+        assert presented is not None
+        assert [o.label for o in presented] == ["1", "2", "3", "4"]
+        assert [o.is_correct for o in presented] == [True, False, False, False]
+
+    def test_other_templates_keep_letters(self, sample_question: MCQuestion) -> None:
+        variants = FormatChangePerturbation().generate_variants(sample_question)
+        lettered = [v for v in variants if "\n1. Paris" not in v.stem]
+        assert len(lettered) == len(variants) - 1
+        for v in lettered:
+            assert v.presented_options is not None
+            assert [o.label for o in v.presented_options] == list("ABCD")
+
+    def test_sampling_keeps_labels_with_their_template(
+        self, sample_question: MCQuestion
+    ) -> None:
+        for seed in range(10):
+            for v in FormatChangePerturbation().generate_variants(
+                sample_question, seed=seed, n=3
+            ):
+                assert v.presented_options is not None
+                numeric = v.presented_options[0].label == "1"
+                assert numeric == ("\n1. Paris" in v.stem)
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +703,17 @@ class TestSeparatorChangeMetadata:
             assert v.seed == seed
             assert v.variant_index == i
             assert v.options is None
+
+    def test_separator_change_presented_options(
+        self, sample_question: MCQuestion
+    ) -> None:
+        """Separator variants show the original labels."""
+        variants = SeparatorChangePerturbation().generate_variants(sample_question)
+        for v in variants:
+            assert v.presented_options is not None
+            assert [(o.label, o.original_label) for o in v.presented_options] == [
+                (lab, lab) for lab in "ABCD"
+            ]
 
 
 # ---------------------------------------------------------------------------

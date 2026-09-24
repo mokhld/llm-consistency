@@ -44,7 +44,11 @@ def dry_run(config: EvaluationConfig, dataset: MCDataset, seed: int = 42) -> Non
     variants = generate_variants_for_question(sample, config, seed)
     sample_prompt = render_prompt(variants[0])
 
-    num_calls = len(mc_questions) * config.num_variants
+    # Each perturbation type yields at most num_variants variants per
+    # question, and fewer when it has fewer distinct ones, so count them.
+    num_calls = sum(
+        len(generate_variants_for_question(q, config, seed)) for q in mc_questions
+    )
     estimated = estimate_cost(config.model, num_calls)
     cost_str = (
         f"~${estimated:.4f}"
@@ -61,7 +65,7 @@ def dry_run(config: EvaluationConfig, dataset: MCDataset, seed: int = 42) -> Non
         + ", ".join(pt.value for pt in config.perturbation_types)
     )
     print(f"  questions (MC):       {len(mc_questions)}")
-    print(f"  variants per Q:       {config.num_variants}")
+    print(f"  variants per type:    {config.num_variants} (max)")
     print(f"  total provider calls: {num_calls}")
     print(f"  estimated cost:       {cost_str}")
     print()

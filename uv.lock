@@ -1092,10 +1092,10 @@ dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
-    { name = "ruff", specifier = ">=0.15.1" },
+    { name = "ruff", specifier = ">=0.15.1,<0.16" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20250915" },
 ]
-lint = [{ name = "ruff", specifier = ">=0.15.1" }]
+lint = [{ name = "ruff", specifier = ">=0.15.1,<0.16" }]
 test = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },

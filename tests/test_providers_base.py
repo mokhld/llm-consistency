@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from llm_consistency.providers._base import BaseLLMProvider, _RawResponse
+from llm_consistency._exceptions import LLMConsistencyError, ValidationError
+from llm_consistency.providers._base import (
+    BaseLLMProvider,
+    EmptyResponseError,
+    _RawResponse,
+)
 from llm_consistency.providers._batch_result import BatchResult
-from llm_consistency.providers._budget import BudgetExceededError
+from llm_consistency.providers._budget import BudgetExceededError, CostPerToken
 from llm_consistency.providers._rate_limit import AsyncTokenBucket
 from llm_consistency.types import LLMResponse
+
+_RETRY_MOD = "llm_consistency.providers._retry"
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +75,18 @@ _DEFAULT_RAW = _RawResponse(
     completion_tokens=8,
     latency_ms=42.5,
 )
+
+# $1 per million tokens both ways: _DEFAULT_RAW costs 28e-6, and the
+# 200 + 50 token pre-request estimate is 250e-6.
+_PRICING = CostPerToken(input_per_token=1e-6, output_per_token=1e-6)
+
+
+class _HTTPStatusError(ConnectionError):
+    """Retryable error carrying an HTTP response, like SDK status errors."""
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        super().__init__("503 Service Unavailable")
+        self.response = SimpleNamespace(headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +241,74 @@ class TestQueryRetry:
         assert provider._call_count == 2
 
     @pytest.mark.asyncio
+    async def test_permission_error_not_retried(self) -> None:
+        """PermissionError is an OSError, but retrying cannot fix it."""
+        provider = _MockProvider(
+            responses=[_DEFAULT_RAW],
+            fail_on={0: PermissionError("401 Unauthorized")},
+            max_retries=3,
+            base_delay=0.0,
+            jitter=0.0,
+        )
+        with pytest.raises(PermissionError):
+            await provider.query("p", question_id="q1")
+        assert provider._call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_after_header_sets_delay(self) -> None:
+        provider = _MockProvider(
+            responses=[_DEFAULT_RAW],
+            fail_on={0: _HTTPStatusError({"retry-after": "0.25"})},
+            max_retries=1,
+            base_delay=5.0,
+            jitter=1.0,
+        )
+        with patch(f"{_RETRY_MOD}.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            await provider.query("p", question_id="q1")
+        sleep.assert_awaited_once_with(0.25)
+
+    @pytest.mark.asyncio
+    async def test_retry_after_capped_at_max_delay(self) -> None:
+        provider = _MockProvider(
+            responses=[_DEFAULT_RAW],
+            fail_on={0: _HTTPStatusError({"retry-after-ms": "120000"})},
+            max_retries=1,
+            max_delay=2.0,
+        )
+        with patch(f"{_RETRY_MOD}.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            await provider.query("p", question_id="q1")
+        sleep.assert_awaited_once_with(2.0)
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_takes_a_rate_limit_token(self) -> None:
+        provider = _MockProvider(
+            responses=[_DEFAULT_RAW],
+            fail_on={0: TimeoutError("t"), 1: ConnectionError("c")},
+            max_retries=2,
+            base_delay=0.0,
+            jitter=0.0,
+        )
+        with patch.object(
+            provider._rate_limiter, "acquire", new_callable=AsyncMock
+        ) as acquire:
+            await provider.query("p", question_id="q1")
+        assert provider._call_count == 3
+        assert acquire.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_empty_response_not_retried(self) -> None:
+        provider = _MockProvider(
+            responses=[_DEFAULT_RAW],
+            fail_on={0: EmptyResponseError("no text")},
+            max_retries=3,
+            base_delay=0.0,
+            jitter=0.0,
+        )
+        with pytest.raises(EmptyResponseError):
+            await provider.query("p", question_id="q1")
+        assert provider._call_count == 1
+
+    @pytest.mark.asyncio
     async def test_retries_exhausted_raises(self) -> None:
         """query() raises after exhausting retries."""
         provider = _MockProvider(
@@ -249,45 +337,193 @@ class TestQueryBudget:
         provider = _MockProvider(
             responses=[_DEFAULT_RAW],
             max_budget_usd=0.001,
+            pricing=_PRICING,
         )
         # Manually push budget tracker past limit
-        await provider._budget.record(actual_cost=0.002)
+        await provider._budget.settle(reserved=0.0, actual_cost=0.002)
         with pytest.raises(BudgetExceededError):
             await provider.query("p", question_id="q1")
+        assert provider._call_count == 0
 
     @pytest.mark.asyncio
-    async def test_budget_check_called_before_request(self) -> None:
-        """budget.check() called with estimated_cost=0.0."""
+    async def test_budget_reserved_before_request(self) -> None:
+        """budget.reserve() gets the 200 + 50 token estimate."""
         provider = _MockProvider(
             responses=[_DEFAULT_RAW],
             max_budget_usd=10.0,
+            pricing=_PRICING,
         )
         with patch.object(
             provider._budget,
-            "check",
+            "reserve",
             new_callable=AsyncMock,
-        ) as mock_check:
+        ) as mock_reserve:
             await provider.query("p", question_id="q1")
-            mock_check.assert_called_once_with(
-                estimated_cost=0.0,
+            mock_reserve.assert_called_once_with(
+                estimated_cost=pytest.approx(250e-6),
             )
 
     @pytest.mark.asyncio
-    async def test_budget_record_called_after_request(self) -> None:
-        """budget.record() called with actual_cost=0.0."""
+    async def test_budget_settled_after_request(self) -> None:
+        """budget.settle() swaps the reservation for the actual cost."""
         provider = _MockProvider(
             responses=[_DEFAULT_RAW],
             max_budget_usd=10.0,
+            pricing=_PRICING,
         )
         with patch.object(
             provider._budget,
-            "record",
+            "settle",
             new_callable=AsyncMock,
-        ) as mock_record:
+        ) as mock_settle:
             await provider.query("p", question_id="q1")
-            mock_record.assert_called_once_with(
-                actual_cost=0.0,
+            mock_settle.assert_called_once_with(
+                reserved=pytest.approx(250e-6),
+                actual_cost=pytest.approx(28e-6),
             )
+
+    @pytest.mark.asyncio
+    async def test_failed_request_releases_reservation(self) -> None:
+        provider = _MockProvider(
+            fail_on={0: ValueError("bad request")},
+            max_retries=0,
+            max_budget_usd=10.0,
+            pricing=_PRICING,
+        )
+        with pytest.raises(ValueError, match="bad request"):
+            await provider.query("p", question_id="q1")
+        assert provider._budget._reserved == 0.0
+        assert provider._budget.spent == 0.0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_request_keeps_its_reservation(self) -> None:
+        """A cancelled request may already have been billed, so it counts."""
+        provider = _MockProvider(
+            delay_s=10.0,
+            max_budget_usd=10.0,
+            pricing=_PRICING,
+        )
+        task = asyncio.create_task(provider.query("p", question_id="q1"))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert provider._budget._reserved == 0.0
+        assert provider._budget.spent == pytest.approx(250e-6)
+
+    @pytest.mark.asyncio
+    async def test_unreported_usage_is_charged_the_estimate(self) -> None:
+        raw = _RawResponse(
+            content="x", prompt_tokens=None, completion_tokens=None, latency_ms=1.0
+        )
+        provider = _MockProvider(
+            responses=[raw],
+            max_budget_usd=10.0,
+            pricing=_PRICING,
+        )
+        await provider.query("p", question_id="q1")
+        assert provider._budget.spent == pytest.approx(250e-6)
+
+    @pytest.mark.asyncio
+    async def test_empty_response_is_charged_its_usage(self) -> None:
+        """An empty response was billed, so its tokens count."""
+        provider = _MockProvider(
+            fail_on={
+                0: EmptyResponseError(
+                    "no text", prompt_tokens=100, completion_tokens=900
+                ),
+            },
+            max_budget_usd=10.0,
+            pricing=_PRICING,
+        )
+        with pytest.raises(EmptyResponseError):
+            await provider.query("p", question_id="q1")
+        assert provider._budget.spent == pytest.approx(1000e-6)
+        assert provider._budget._reserved == 0.0
+
+    @pytest.mark.asyncio
+    async def test_reservation_grows_to_largest_cost_seen(self) -> None:
+        big = _RawResponse(
+            content="x", prompt_tokens=1000, completion_tokens=1000, latency_ms=1.0
+        )
+        provider = _MockProvider(
+            responses=[big, _DEFAULT_RAW],
+            max_budget_usd=10.0,
+            pricing=_PRICING,
+        )
+        assert provider._estimate_cost("p", None) == pytest.approx(250e-6)
+        await provider.query("p", question_id="q1")
+        assert provider._estimate_cost("p", None) == pytest.approx(2000e-6)
+        await provider.query("p", question_id="q2")
+        # A cheaper response does not shrink the reservation
+        assert provider._estimate_cost("p", None) == pytest.approx(2000e-6)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_queries_stop_at_the_cap(self) -> None:
+        """Requests in flight hold their reservation, so spend stays capped.
+
+        Each call costs 0.001 (200 input + 50 output tokens at gpt-4o
+        prices). Before reservations, all 50 concurrent calls passed the
+        check and spent 0.05 against a 0.0205 cap.
+        """
+        raw = _RawResponse(
+            content="x", prompt_tokens=200, completion_tokens=50, latency_ms=1.0
+        )
+        provider = _MockProvider(
+            responses=[raw],
+            delay_s=0.01,
+            max_budget_usd=0.0205,
+            pricing=CostPerToken(input_per_token=2.5e-6, output_per_token=10e-6),
+            requests_per_minute=60_000,
+        )
+        results = await asyncio.gather(
+            *(provider.query("p", question_id=f"q{i}") for i in range(50)),
+            return_exceptions=True,
+        )
+        succeeded = [r for r in results if isinstance(r, LLMResponse)]
+        refused = [r for r in results if isinstance(r, BudgetExceededError)]
+        assert len(succeeded) == 20
+        assert len(refused) == 30
+        assert provider._call_count == 20
+        assert provider._budget.spent == pytest.approx(0.020)
+
+
+# ---------------------------------------------------------------------------
+# Tests: constructor pricing and rate-limit settings
+# ---------------------------------------------------------------------------
+class TestConstruction:
+    def test_budget_without_price_raises(self) -> None:
+        with pytest.raises(ValidationError, match="no price is known"):
+            _MockProvider(max_budget_usd=1.0)
+
+    def test_pricing_override_allows_budget(self) -> None:
+        provider = _MockProvider(max_budget_usd=1.0, pricing=_PRICING)
+        assert provider._pricing is _PRICING
+
+    def test_no_budget_needs_no_price(self) -> None:
+        provider = _MockProvider()
+        assert provider._pricing is None
+        assert provider._estimate_cost("p", None) == 0.0
+
+    @pytest.mark.parametrize(
+        ("rpm", "capacity"),
+        [(600, 60), (60, 6), (5, 1)],
+    )
+    def test_burst_is_a_tenth_of_a_minute(self, rpm: int, capacity: int) -> None:
+        provider = _MockProvider(requests_per_minute=rpm)
+        assert provider._rate_limiter._capacity == capacity
+        assert provider._rate_limiter._rate == pytest.approx(rpm / 60)
+
+
+class TestEmptyResponseError:
+    def test_is_llm_consistency_error(self) -> None:
+        assert issubclass(EmptyResponseError, LLMConsistencyError)
+
+    def test_carries_usage(self) -> None:
+        err = EmptyResponseError("no text", prompt_tokens=3, completion_tokens=4)
+        assert str(err) == "no text"
+        assert err.prompt_tokens == 3
+        assert err.completion_tokens == 4
 
 
 # ---------------------------------------------------------------------------
@@ -370,3 +606,38 @@ class TestQueryBatch:
         elapsed = time.monotonic() - t0
         assert result.completed == 2
         assert elapsed < 0.35, f"Expected < 0.35s (concurrent), got {elapsed:.3f}s"
+
+
+class TestBudgetUnderConcurrency:
+    @pytest.mark.asyncio
+    async def test_first_request_runs_alone_so_the_cap_holds(self) -> None:
+        """Ten concurrent requests costing $0.00775 each against a $0.02 cap.
+
+        The first request runs alone, so later requests reserve the observed
+        cost: two fit under the cap and the rest are refused, instead of all
+        ten passing the small default estimate at once.
+        """
+        raw = _RawResponse(
+            content="x", prompt_tokens=1500, completion_tokens=400, latency_ms=1.0
+        )
+        pricing = CostPerToken(input_per_token=2.5e-6, output_per_token=10e-6)
+        provider = _MockProvider(
+            responses=[raw], delay_s=0.01, max_budget_usd=0.02, pricing=pricing
+        )
+        results = await asyncio.gather(
+            *(provider.query("p", question_id=f"q{i}") for i in range(10)),
+            return_exceptions=True,
+        )
+        assert sum(not isinstance(r, BaseException) for r in results) == 2
+        assert all(
+            isinstance(r, BudgetExceededError)
+            for r in results
+            if isinstance(r, BaseException)
+        )
+        assert provider._budget.spent == pytest.approx(0.0155)
+
+    def test_estimate_scales_with_prompt_length(self) -> None:
+        provider = _MockProvider(max_budget_usd=1.0, pricing=_PRICING)
+        short = provider._estimate_cost("p", None)
+        long = provider._estimate_cost("x" * 30_000, "system")
+        assert long > short

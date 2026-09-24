@@ -447,7 +447,8 @@ class TestBatchRunnerCheckpointResume:
         )
 
         assert report.total_questions == 3
-        assert _read_qcr_ids_from_checkpoint(ckpt) == ["q0", "q1", "q2"]
+        # Questions run concurrently, so the file is in completion order.
+        assert sorted(_read_qcr_ids_from_checkpoint(ckpt)) == ["q0", "q1", "q2"]
 
     @pytest.mark.asyncio
     async def test_resume_skips_completed_questions(
@@ -472,7 +473,7 @@ class TestBatchRunnerCheckpointResume:
             seed=42,
             checkpoint_path=ckpt,
         )
-        assert _read_qcr_ids_from_checkpoint(ckpt) == ["q0", "q1"]
+        assert sorted(_read_qcr_ids_from_checkpoint(ckpt)) == ["q0", "q1"]
 
         # Resume against the full dataset.
         resume_provider = _CountingProvider(model="mock")
@@ -496,7 +497,7 @@ class TestBatchRunnerCheckpointResume:
         # Final report should cover all 4 questions in dataset order.
         assert report.total_questions == 4
         assert [r.question_id for r in report.results] == ["q0", "q1", "q2", "q3"]
-        assert _read_qcr_ids_from_checkpoint(ckpt) == ["q0", "q1", "q2", "q3"]
+        assert sorted(_read_qcr_ids_from_checkpoint(ckpt)) == ["q0", "q1", "q2", "q3"]
 
     @pytest.mark.asyncio
     async def test_resume_with_mismatched_config_raises(

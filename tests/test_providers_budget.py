@@ -71,49 +71,82 @@ class TestBudgetTracker:
 
     async def test_unlimited_budget_never_raises(self) -> None:
         tracker = BudgetTracker(max_budget_usd=None)
-        await tracker.check(estimated_cost=1000.0)
-        await tracker.record(actual_cost=1000.0)
-        await tracker.check(estimated_cost=1000.0)
+        await tracker.reserve(estimated_cost=1000.0)
+        await tracker.settle(reserved=1000.0, actual_cost=1000.0)
+        await tracker.reserve(estimated_cost=1000.0)
         # No exception raised
 
-    async def test_check_raises_when_exceeds_budget(self) -> None:
+    async def test_reserve_raises_when_exceeds_budget(self) -> None:
         tracker = BudgetTracker(max_budget_usd=2.0)
-        await tracker.record(actual_cost=1.5)
+        await tracker.settle(reserved=0.0, actual_cost=1.5)
         with pytest.raises(BudgetExceededError) as exc_info:
-            await tracker.check(estimated_cost=0.8)
+            await tracker.reserve(estimated_cost=0.8)
         assert exc_info.value.spent == pytest.approx(1.5)
         assert exc_info.value.estimated == pytest.approx(0.8)
         assert exc_info.value.limit == pytest.approx(2.0)
 
-    async def test_record_accumulates_cost(self) -> None:
+    async def test_reservations_count_against_budget(self) -> None:
+        """An unsettled reservation blocks a request that would overshoot."""
+        tracker = BudgetTracker(max_budget_usd=1.0)
+        await tracker.reserve(estimated_cost=0.6)
+        with pytest.raises(BudgetExceededError) as exc_info:
+            await tracker.reserve(estimated_cost=0.6)
+        assert exc_info.value.spent == pytest.approx(0.6)
+        assert tracker.spent == 0.0
+
+    async def test_rejected_reservation_is_not_held(self) -> None:
+        tracker = BudgetTracker(max_budget_usd=1.0)
+        with pytest.raises(BudgetExceededError):
+            await tracker.reserve(estimated_cost=2.0)
+        await tracker.reserve(estimated_cost=1.0)
+
+    async def test_settle_replaces_reservation_with_actual_cost(self) -> None:
+        tracker = BudgetTracker(max_budget_usd=1.0)
+        await tracker.reserve(estimated_cost=0.6)
+        await tracker.settle(reserved=0.6, actual_cost=0.1)
+        assert tracker.spent == pytest.approx(0.1)
+        # 0.1 spent + 0.9 fits exactly
+        await tracker.reserve(estimated_cost=0.9)
+
+    async def test_settle_with_zero_cost_releases_reservation(self) -> None:
+        tracker = BudgetTracker(max_budget_usd=1.0)
+        await tracker.reserve(estimated_cost=1.0)
+        await tracker.settle(reserved=1.0, actual_cost=0.0)
+        assert tracker.spent == 0.0
+        await tracker.reserve(estimated_cost=1.0)
+
+    async def test_settle_accumulates_cost(self) -> None:
         tracker = BudgetTracker(max_budget_usd=10.0)
-        await tracker.record(actual_cost=1.0)
-        await tracker.record(actual_cost=2.5)
+        await tracker.settle(reserved=0.0, actual_cost=1.0)
+        await tracker.settle(reserved=0.0, actual_cost=2.5)
         assert tracker.spent == pytest.approx(3.5)
 
     async def test_spent_property_returns_accumulated(self) -> None:
         tracker = BudgetTracker(max_budget_usd=None)
         assert tracker.spent == 0.0
-        await tracker.record(actual_cost=5.0)
+        await tracker.settle(reserved=0.0, actual_cost=5.0)
         assert tracker.spent == pytest.approx(5.0)
 
-    async def test_check_passes_when_within_budget(self) -> None:
+    async def test_reserve_passes_when_within_budget(self) -> None:
         tracker = BudgetTracker(max_budget_usd=10.0)
-        await tracker.record(actual_cost=3.0)
-        await tracker.check(estimated_cost=5.0)
+        await tracker.settle(reserved=0.0, actual_cost=3.0)
+        await tracker.reserve(estimated_cost=5.0)
         # No exception -- 3.0 + 5.0 = 8.0 <= 10.0
 
-    async def test_concurrent_check_record_safe(self) -> None:
-        """Concurrent check-then-record under asyncio.Lock."""
-        tracker = BudgetTracker(max_budget_usd=100.0)
+    async def test_concurrent_reservations_never_overshoot(self) -> None:
+        """Concurrent reserve-then-settle cycles stop exactly at the cap."""
+        tracker = BudgetTracker(max_budget_usd=1.0)
 
-        async def check_and_record(cost: float) -> None:
-            await tracker.check(estimated_cost=cost)
-            await tracker.record(actual_cost=cost)
+        async def reserve_and_settle(cost: float) -> bool:
+            try:
+                await tracker.reserve(estimated_cost=cost)
+            except BudgetExceededError:
+                return False
+            await asyncio.sleep(0)  # let the other tasks interleave
+            await tracker.settle(reserved=cost, actual_cost=cost)
+            return True
 
-        # Run many concurrent check+record cycles
-        tasks = [check_and_record(0.1) for _ in range(50)]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*(reserve_and_settle(0.1) for _ in range(50)))
 
-        # All 50 should have been recorded
-        assert tracker.spent == pytest.approx(5.0, abs=0.01)
+        assert sum(results) == 10
+        assert tracker.spent == pytest.approx(1.0)

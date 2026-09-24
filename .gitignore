@@ -29,3 +29,7 @@ htmlcov/
 
 # Content drafts
 .content/
+
+# Local review findings and feature backlog (kept out of the public repo)
+docs/REVIEW.md
+docs/FEATURES.md

@@ -339,6 +339,75 @@ class TestSchemaValidation:
 
 
 # ---------------------------------------------------------------------------
+# Answer formats
+# ---------------------------------------------------------------------------
+
+
+def _correct_label(rows: list[dict[str, Any]], **kwargs: Any) -> str:
+    """Load *rows* through a mocked Hub and return the correct option label."""
+    with patch.dict(sys.modules, _install_fake_datasets(MagicMock(return_value=rows))):
+        ds = MCDataset.load_from_hub("ex/mc", **kwargs)
+    return next(o.label for o in ds.questions[0].options if o.is_correct)
+
+
+class TestAnswerFormat:
+    """Numeric strings, digit-text choices and explicit ``answer_format``."""
+
+    def test_digit_string_is_an_index(self) -> None:
+        """HellaSwag stores the 0-based answer index as a string."""
+        rows = [_mmlu_row(choices=["runs", "jumps", "sits", "eats"], answer="2")]
+        assert _correct_label(rows) == "C"
+
+    def test_digit_string_out_of_range_falls_back_to_text(self) -> None:
+        rows = [_mmlu_row(choices=["3", "4", "5", "6"], answer="4")]
+        assert _correct_label(rows) == "B"
+
+    def test_digit_string_out_of_range_without_text_match(self) -> None:
+        rows = [_mmlu_row(choices=["a", "b", "c", "d"], answer="7")]
+        with pytest.raises(ValidationError, match=r"index 7 .* out of range"):
+            _correct_label(rows)
+
+    def test_digit_text_choices_are_ambiguous_in_auto(self) -> None:
+        rows = [_mmlu_row(choices=["1", "2", "3", "4"], answer="1")]
+        with pytest.raises(ValidationError, match=r"ambiguous.*answer_format"):
+            _correct_label(rows)
+
+    def test_readings_that_agree_are_not_ambiguous(self) -> None:
+        rows = [_mmlu_row(choices=["0", "1", "2"], answer="1")]
+        assert _correct_label(rows) == "B"
+
+    def test_explicit_format_resolves_digit_text_choices(self) -> None:
+        rows = [_mmlu_row(choices=["1", "2", "3", "4"], answer="1")]
+        assert _correct_label(rows, answer_format="text") == "A"
+        assert _correct_label(rows, answer_format="index") == "B"
+
+    def test_letter_that_is_also_a_choice_text(self) -> None:
+        rows = [_mmlu_row(choices=["the", "a", "an"], answer="a")]
+        with pytest.raises(ValidationError, match="ambiguous"):
+            _correct_label(rows)
+        assert _correct_label(rows, answer_format="text") == "B"
+        assert _correct_label(rows, answer_format="label") == "A"
+
+    def test_text_format_accepts_int_answer(self) -> None:
+        rows = [_mmlu_row(choices=["3", "4", "5", "6"], answer=4)]
+        assert _correct_label(rows, answer_format="text") == "B"
+
+    @pytest.mark.parametrize(
+        ("answer_format", "answer"), [("label", "2"), ("index", "B")]
+    )
+    def test_answer_that_does_not_fit_the_format(
+        self, answer_format: str, answer: str
+    ) -> None:
+        rows = [_mmlu_row(choices=["a", "b", "c"], answer=answer)]
+        with pytest.raises(ValidationError, match=f"not a valid {answer_format}"):
+            _correct_label(rows, answer_format=answer_format)
+
+    def test_unknown_answer_format(self) -> None:
+        with pytest.raises(ValidationError, match="Unknown answer_format"):
+            _correct_label([_mmlu_row()], answer_format="letter")
+
+
+# ---------------------------------------------------------------------------
 # MCQuestion invariants are enforced
 # ---------------------------------------------------------------------------
 

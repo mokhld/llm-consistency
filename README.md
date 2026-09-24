@@ -4,7 +4,6 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-591%20passed-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-95.15%25-brightgreen.svg)]()
 [![Type Checked](https://img.shields.io/badge/mypy-strict-blue.svg)]()
 
@@ -107,12 +106,14 @@ llm-consistency run \
 ┏━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┓
 ┃ Metric          ┃  Value ┃ Status ┃
 ┡━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━┩
-│ CORE            │ 0.5544 │  PASS  │
-│ MCA             │ 0.0000 │  FAIL  │
-│ Mean RC Correct │ 0.7667 │  FAIL  │
-│ Mean RC Agree   │ 0.7667 │  PASS  │
+│ CORE            │ 0.5544 │  n/a   │
+│ MCA(1.00)       │ 0.0000 │  FAIL  │
+│ Mean RC Correct │ 0.7667 │        │
+│ Mean RC Agree   │ 0.7667 │        │
 └─────────────────┴────────┴────────┘
 ```
+
+The status column uses the same rule as `--ci` (see [CI/CD Integration](#cicd-integration)). CORE shows `n/a` when no `--core-threshold` is set. The two means are informational. When any provider call failed, a `Failed variants` row shows how many.
 
 ## CLI Reference
 
@@ -129,18 +130,20 @@ llm-consistency run [OPTIONS]
 | `--model` | `-m` | *required* | LLM model identifier (e.g., `gpt-5-mini`, `claude-sonnet-4-20250514`) |
 | `--provider` | `-p` | *required* | Provider name: `openai`, `anthropic`, `ollama`, `litellm`, `mock` |
 | `--dataset` | `-d` | *required* | Path to dataset file (JSON, JSONL, or CSV) |
-| `--config` | `-c` | — | Config file path (YAML or TOML), values merged as defaults |
-| `--output` | `-o` | — | JSON report output path |
+| `--config` | `-c` | none | Config file path (YAML or TOML), values merged as defaults |
+| `--output` | `-o` | none | Report output path. The format follows the extension (see below) |
 | `--perturbations` | | `option_reorder` | Perturbation types to apply (repeatable) |
-| `--num-variants` | | `5` | Number of variants to generate per question per perturbation type |
+| `--num-variants` | | `5` | Maximum variants per question per perturbation type. A type with fewer distinct variants yields fewer (a 4-option question has 23 reorderings, 7 format templates, 8 separators) |
 | `--concurrency` | | `10` | Maximum concurrent API calls |
 | `--seed` | | `42` | Random seed for reproducible perturbation generation |
 | `--scorer` | | `exact_match` | Scoring method |
-| `--mca-threshold` | | `1.0` | MCA threshold for pass/fail status display |
-| `--core-threshold` | | — | CORE threshold for pass/fail (disabled when unset) |
-| `--max-budget-usd` | | — | Maximum spend in USD (evaluation stops when exceeded) |
-| `--ci` | | `false` | CI mode: suppresses console output, exits with code 0 (pass) or 1 (fail) |
-| `--dry-run` | | `false` | Validate dataset, config, provider, and render one sample prompt without spending tokens |
+| `--mca-threshold` | | `1.0` | Consistency level c for MCA: a question passes when its RC_correct >= c |
+| `--min-mca` | | `1.0` | Minimum MCA at `--mca-threshold` for a pass. `1.0` requires every question to pass |
+| `--core-threshold` | | none | Minimum CORE for a pass (not checked when unset) |
+| `--max-budget-usd` | | none | Spending cap in USD. The run stops with an error before a request that would exceed it (see [Budget cap](#budget-cap)) |
+| `--rpm` | | `60` | Provider rate limit in requests per minute |
+| `--ci` | | `false` | CI mode: skips the console summary, exits 0 when every check passes and 1 otherwise |
+| `--dry-run` | | `false` | Validate dataset, config, provider, and render one sample prompt without spending tokens. Prints the number of provider calls the run will make and warns when the cost estimate exceeds `--max-budget-usd` |
 
 **Output format is detected from the `--output` extension:**
 
@@ -163,6 +166,14 @@ llm-consistency run \
   --num-variants 5 --seed 42 \
   --max-budget-usd 1.00
 ```
+
+### Budget cap
+
+`--max-budget-usd` is enforced by the provider. Before each request it reserves an estimated cost, and if that would take total spend over the cap it raises `BudgetExceededError`. The run then stops: the command prints `Error: Budget exceeded: ...`, exits with code 1 (also under `--ci`), and writes no report, because a partial run would give misleading metrics.
+
+The cap needs a price for the model. When `--max-budget-usd` is set and the model is not in the built-in pricing table (`providers/_cost.py`), the command refuses to start. From Python you can pass `pricing=CostPerToken(...)` to `get_provider`. Use `--dry-run` first to see the number of calls and a cost estimate.
+
+Transient API errors (rate limits, timeouts, connection errors, HTTP 408/409/429 and 5xx) are retried with backoff, honouring `Retry-After`. A variant that still fails is recorded as a failed variant, counted in the console summary, and fails `--ci`.
 
 ### `llm-consistency compare`
 
@@ -192,6 +203,20 @@ perturbations:
   - format_change
 num_variants: 3
 seed: 42
+```
+
+`models` and `dataset` are required. The other keys are `perturbations`, `num_variants`, `concurrency`, `scorer`, `seed`, `mca_threshold`, `min_mca`, `core_threshold`, `max_budget_usd` and `rpm`, with the same meaning and defaults as the `run` options. `max_budget_usd` applies to each model separately. Unknown keys are rejected.
+
+Every provider is created before the first model runs, so a bad provider name, a missing SDK or an unpriced model fails before any spend. Models run one after another. Each model's summary is printed, and its report is written to `--output` with run metadata, as soon as that model finishes, so a later failure does not lose earlier results. File names come from the model name with characters other than letters, digits, `.`, `_` and `-` replaced by `_` (`openai/gpt-4o-mini` becomes `openai_gpt-4o-mini.json`); repeated names get `-2`, `-3` suffixes.
+
+After the last model, a table compares CORE, MCA at `mca_threshold`, mean RC_correct, mean RC_agree, and the p-value of McNemar's exact test (`compare_mca_paired`) on per-question MCA pass/fail against the first model:
+
+```
+Comparison (p-value: McNemar exact test on MCA(1.00) pass/fail against gpt-5-mini)
+Model                        CORE  MCA(1.00)  RC_correct  RC_agree  p-value
+---------------------------------------------------------------------------
+gpt-5-mini                 0.6120     0.4000      0.8133    0.8400        -
+claude-haiku-4-5-20251001  0.7015     0.5333      0.8667    0.8933   0.0391
 ```
 
 ### `llm-consistency perturbations list`
@@ -225,7 +250,9 @@ Valid mc dataset: 15 questions
 
 ## Configuration Files
 
-Both YAML and TOML are supported. Config values serve as defaults that CLI flags override.
+Both YAML and TOML are supported. Config values serve as defaults that CLI flags override: an explicit flag beats the config file, and the config file beats the built-in default.
+
+Put the settings under a `run` section (YAML `run:`, TOML `[run]`) as below, or at the top level of the file. Keys are the `run` option names with underscores (`num_variants`, `mca_threshold`, `min_mca`, `max_budget_usd`, `rpm`, ...), plus `dataset` for the dataset path. A key the command does not know, such as a typo, is an error that lists the valid keys.
 
 **YAML example (`config.yaml`):**
 
@@ -359,8 +386,13 @@ async def main():
         max_budget_usd=1.00,
     )
 
-    # Run evaluation
-    provider = get_provider("openai", model="gpt-5-mini")
+    # Run evaluation. The provider enforces the budget, so pass it here;
+    # runner.run() raises BudgetExceededError if the cap is reached.
+    provider = get_provider(
+        "openai",
+        model="gpt-5-mini",
+        max_budget_usd=config.max_budget_usd,
+    )
     runner = BatchRunner()
     report = await runner.run(dataset, config, provider, ExactMatchScorer(), seed=42)
 
@@ -382,8 +414,8 @@ asyncio.run(main())
 Pass `checkpoint_path` to `BatchRunner.run()` to persist each completed
 `QuestionConsistencyResult` to a JSONL file as soon as it's computed. If
 the run crashes (network failure, OOM, ctrl-c, host reboot), restart
-with the same arguments and previously-completed questions are skipped
-— the provider is not re-queried for them.
+with the same arguments and previously-completed questions are skipped;
+the provider is not re-queried for them.
 
 ```python
 report = await runner.run(
@@ -393,12 +425,21 @@ report = await runner.run(
 )
 ```
 
-The checkpoint header records a SHA-256 hash of the `EvaluationConfig`
-and seed. Resuming with a different config or seed raises
-`ValidationError` so results from incompatible runs can't be mixed.
-A crash-truncated final line is detected and skipped on resume; all
-earlier results remain intact. The dataset itself is *not* hashed —
-keep it stable between resumes.
+The checkpoint header records a SHA-256 hash of the settings that change
+results: `model`, `provider`, `perturbation_types`, `scorer`,
+`num_variants` and the seed. Resuming with a different value for any of
+them raises `ValidationError`, so results from incompatible runs can't be
+mixed. Changing `concurrency`, `max_budget_usd` or the pass/fail
+thresholds is allowed. Checkpoints written by releases before 1.1 are
+rejected, because those releases scored `option_reorder` variants against
+the wrong labels.
+
+Questions with a failed variant (a provider error) are not written to
+the checkpoint, so a resume retries them. A crash-truncated final line is
+skipped on resume and removed before new records are appended; all
+earlier results remain intact. The dataset itself is not hashed: results
+for question IDs no longer in the dataset are dropped with a warning, but
+keep the questions themselves stable between resumes.
 
 ### Alternative Report Formats
 
@@ -428,7 +469,7 @@ from llm_consistency import (
 class MyPerturbation(BasePerturbation):
     @property
     def perturbation_type(self) -> PerturbationType:
-        return PerturbationType.FORMAT_CHANGE  # or define your own
+        return PerturbationType.FORMAT_CHANGE
 
     def generate_variants(
         self, question: MCQuestion, *, seed: int = 0, n: int | None = None
@@ -436,18 +477,28 @@ class MyPerturbation(BasePerturbation):
         # Your perturbation logic here
         ...
 
-register_perturbation("my_perturbation", MyPerturbation())
+# Replace the built-in format_change generator in this Python process.
+register_perturbation("format_change", MyPerturbation(), force=True)
 ```
+
+Set `presented_options` on every variant: a tuple of `PresentedOption(label=..., text=..., is_correct=..., original_label=...)` giving the label the model sees for each option and that option's label in the original question. Answers are scored against these presented labels, and agreement is counted by original label. Without it, the runner assumes every option kept its original label and issues a `UserWarning`; that assumption is wrong for any perturbation that reorders or relabels options.
+
+The runners select generators by `PerturbationType` value (`option_reorder`, `format_change`, `separator_change`), so today a custom generator is used only when it is registered under one of those values with `force=True`, as above. A generator registered under a new name, such as `"my_perturbation"`, shows up in `list_registered_perturbations()` but cannot be selected for a run yet. Registration is per process, so it does not affect separate `llm-consistency` CLI invocations.
 
 ### Custom Scorers
 
 ```python
 from llm_consistency import CustomScorerAdapter, ScoredResponse, LLMResponse, MCQuestion
 
-# Full-signature scorer (receives both response and question, returns ScoredResponse)
+# Simple form: the adapter extracts the answer label and passes
+# (extracted_label, correct_label) to your function.
+scorer = CustomScorerAdapter(lambda extracted, correct: extracted == correct, simple=True)
+
+# Full form: receives the raw response and the question as this variant
+# presented it (labels match what the model saw), returns a ScoredResponse.
 def my_scorer(response: LLMResponse, question: MCQuestion) -> ScoredResponse:
     correct = next(o for o in question.options if o.is_correct)
-    is_correct = response.extracted_answer == correct.label
+    is_correct = response.raw_output.strip().startswith(correct.label)
     return ScoredResponse(
         question_id=response.question_id,
         is_correct=is_correct,
@@ -457,6 +508,8 @@ def my_scorer(response: LLMResponse, question: MCQuestion) -> ScoredResponse:
 
 scorer = CustomScorerAdapter(my_scorer)
 ```
+
+`response.extracted_answer` is empty when a scorer is called; read `response.raw_output`.
 
 ### Offline Testing with Mock Provider
 
@@ -525,8 +578,9 @@ The lower-level bootstrap primitives are exposed too: `bootstrap_ci(...)` (perce
 
 ### Sample-Size Power Analysis
 
-Sanity-check whether your dataset is large enough to detect the
-effect size you care about:
+`validate_sample_size` sizes a two-sided one-sample test of a single
+proportion, such as one model's MCA at a fixed threshold against a
+reference value, with Cohen's h as the effect size:
 
 ```python
 from llm_consistency import validate_sample_size
@@ -539,19 +593,25 @@ result = validate_sample_size(
 )
 # {
 #   "n": 150.0, "effect_size": 0.5, "alpha": 0.05, "target_power": 0.80,
-#   "observed_power": 0.99, "recommended_n": 32.0,
+#   "power_at_n": 0.99, "observed_power": 0.99, "recommended_n": 32.0,
 # }
 ```
 
-Emits `UserWarning` when `n < 200` (the typical perturbation-study
-guideline). Use the dict's `recommended_n` to size new runs; use
-`observed_power` to know whether an existing run was powered enough
-to trust.
+`recommended_n` is the smallest `n` that reaches `target_power` at the
+given effect size. `power_at_n` is the power at your `n` if the true
+effect is exactly `effect_size`. It is computed from that assumed
+effect, not observed in your data; `observed_power` is the same value
+under its older name. The function does not size a comparison of two
+models: the power of `compare_mca_paired` (McNemar's test) depends on
+how many questions the two models disagree on, which it does not model.
 
-### Which Perturbation Drives the Consistency Drop?
+Emits `UserWarning` when `n < 200`. That cut-off is this package's rule
+of thumb for flagging small studies, not a figure from the CAT paper.
 
-`perturbation_impact` decomposes the failure rate by perturbation
-type, so you know which axis to focus mitigation on:
+### Failure rate by perturbation type
+
+`perturbation_impact` returns the failure rate of the variants of each
+perturbation type:
 
 ```python
 from llm_consistency import perturbation_impact
@@ -566,6 +626,12 @@ Values are the mean failure rate (`1 - mean is_correct`) across all
 variants of each type. The runner pipeline annotates each
 `ScoredResponse` with its source `perturbation_type`; legacy
 responses without the annotation are silently skipped.
+
+The failure rate includes the model's base error rate. A model that is
+70% accurate and never changes its answer scores about 0.30 for every
+type. The unperturbed question is never asked, so the value cannot say
+how much of the error a perturbation caused. It is not a variance
+decomposition. Compare types against each other with that in mind.
 
 ### Paired Model Comparison
 
@@ -660,21 +726,26 @@ Add consistency checks to your CI pipeline:
       --perturbations format_change \
       --num-variants 3 \
       --mca-threshold 0.8 \
+      --min-mca 0.95 \
       --core-threshold 0.5 \
       --max-budget-usd 2.00 \
+      --output consistency-report.json \
       --ci
 ```
 
-The `--ci` flag:
-- Suppresses console output (Rich tables, CAR curves)
-- Exits with code **0** if all thresholds pass
-- Exits with code **1** if any threshold fails
+The `--ci` flag skips the console summary and exits with code **0** when every check below passes, **1** otherwise:
 
-**MCA threshold semantics:** `--mca-threshold 0.8` requires that *every question* achieves RC_correct >= 0.8 (i.e., `mca(results, 0.8) == 1.0`). This is intentionally strict — a single inconsistent question fails the check.
+1. **MCA:** `mca(results, mca_threshold) >= min_mca`.
+2. **CORE:** `core_index(results) >= core_threshold`, only when `--core-threshold` is set.
+3. **Failed variants:** no variant failed with a provider error after retries.
+
+Each failed check is logged to stderr, for example `MCA check failed: MCA(threshold=0.800) = 0.920, expected >= 0.950` or `Error check failed: 3 of 450 variants failed with provider errors`. The `--output` report is written before the command exits, so a failed build still has it. A budget stop (see [Budget cap](#budget-cap)) exits with code 1 and writes no report.
+
+**Threshold semantics:** `--mca-threshold` is the consistency level c: a question passes when its RC_correct >= c. `--min-mca` is the share of questions that must pass. The defaults (`--mca-threshold 1.0 --min-mca 1.0`) require every question to be answered correctly on every variant, so a single inconsistent question fails the build. With `--mca-threshold 0.8 --min-mca 0.95`, at least 95% of questions must be correct on at least 80% of their variants. The console summary applies the same rule.
 
 ## JSON Report Format
 
-The `--output` flag produces a structured JSON report:
+With a `.json` path (or any extension other than `.csv`, `.md`, `.markdown`, `.html` and `.htm`), the `--output` flag produces a structured JSON report:
 
 ```json
 {
@@ -682,9 +753,14 @@ The `--output` flag produces a structured JSON report:
     "model": "gpt-5-mini",
     "provider": "openai",
     "perturbation_types": ["OPTION_REORDER", "FORMAT_CHANGE"],
+    "scorer": "exact_match",
     "num_variants": 3,
+    "concurrency": 10,
+    "max_budget_usd": null,
     "mca_threshold": 1.0,
-    "core_threshold": null
+    "min_mca": 1.0,
+    "core_threshold": null,
+    "ci_mode": false
   },
   "results": [
     {
@@ -717,13 +793,18 @@ The `--output` flag produces a structured JSON report:
     "car_curve_ci": [[0.0, {"value": 1.0, "ci_lower": 1.0, "ci_upper": 1.0, "n_samples": 5, "confidence": 0.95, "method": "bca"}], ...]
   },
   "metadata": {
-    "started_at": "2026-02-22T...",
-    "finished_at": "2026-02-22T...",
+    "package_version": "0.1.0",
+    "python_version": "3.12.4",
+    "timestamp": "2026-02-22T10:15:03.412345+00:00",
+    "config_snapshot": {"model": "gpt-5-mini", "provider": "openai", ...},
+    "perturbation_seed": 42,
     "model": "gpt-5-mini",
     "provider": "openai"
   }
 }
 ```
+
+`metadata.timestamp` is when the run started (UTC), and `config_snapshot` is the same dictionary as `config`.
 
 ## Architecture
 
@@ -783,9 +864,7 @@ uv run python examples/01_basic_mock.py
 uv run python examples/05_export_formats.py
 ```
 
-Changes are tracked in [`CHANGELOG.md`](CHANGELOG.md). The
-audit-driven roadmap lives in [`AUDIT.md`](AUDIT.md) — findings
-tagged Done / Skipped / Outstanding with commit hashes.
+Changes are tracked in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

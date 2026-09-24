@@ -38,6 +38,9 @@ class AsyncTokenBucket:
             if self._tokens < 1.0:
                 wait_time = (1.0 - self._tokens) / self._rate
                 await asyncio.sleep(wait_time)
+                # The token accrued during the sleep is consumed here, so
+                # refill accounting restarts from when it became available.
                 self._tokens = 0.0
+                self._last_refill = now + wait_time
             else:
                 self._tokens -= 1.0

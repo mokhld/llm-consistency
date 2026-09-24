@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import re
 from typing import TYPE_CHECKING, Any
 
 import click
 
-from llm_consistency._config_loader import load_config_file
+from llm_consistency._config_loader import (
+    check_config_keys,
+    load_config_file,
+    run_defaults_from_config,
+)
 from llm_consistency._exceptions import LLMConsistencyError, ValidationError
 from llm_consistency.datasets import MCDataset
+from llm_consistency.metrics import compare_mca_paired, core_index, mca
+from llm_consistency.perturbations import (
+    list_registered as list_registered_perturbations,
+)
 from llm_consistency.providers import get_provider
 from llm_consistency.providers._cost import estimate_cost
 from llm_consistency.reports import ConsoleReporter, export_json
@@ -25,6 +34,29 @@ from llm_consistency.types import EvaluationConfig, MCQuestion, PerturbationType
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from llm_consistency.providers import BaseLLMProvider
+    from llm_consistency.types import EvaluationReport
+
+# Keys accepted in a ``compare`` config file.
+_COMPARE_KEYS = frozenset(
+    {
+        "models",
+        "dataset",
+        "perturbations",
+        "num_variants",
+        "concurrency",
+        "scorer",
+        "seed",
+        "mca_threshold",
+        "min_mca",
+        "core_threshold",
+        "max_budget_usd",
+        "rpm",
+    }
+)
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -58,6 +90,12 @@ def _handle_errors(func: Callable[..., Any]) -> Callable[..., Any]:
             ) from None
         except TypeError as exc:
             raise click.ClickException(f"Invalid data format: {exc}") from None
+        except ImportError as exc:
+            # Raised by providers whose optional SDK is not installed.
+            raise click.ClickException(str(exc)) from None
+        except ValueError as exc:
+            # Unknown provider names and malformed dataset files.
+            raise click.ClickException(str(exc)) from None
 
     return wrapper
 
@@ -71,7 +109,8 @@ def _load_config_callback(
 
     Loads a YAML or TOML config file and merges values into the Click
     context's ``default_map``, allowing config file values to serve
-    as defaults that CLI flags can override.
+    as defaults that CLI flags can override. Settings may sit under a
+    ``run`` section or at the top level; unknown keys are rejected.
 
     Args:
         ctx: Click context.
@@ -82,12 +121,13 @@ def _load_config_callback(
         return
     from pathlib import Path  # noqa: PLC0415
 
+    param_names = [p.name for p in ctx.command.params if p.expose_value and p.name]
     try:
-        data = load_config_file(Path(value))
+        defaults = run_defaults_from_config(load_config_file(Path(value)), param_names)
     except ValidationError as exc:
         raise click.ClickException(f"Config error: {exc}") from None
     ctx.default_map = ctx.default_map or {}
-    ctx.default_map.update(data)
+    ctx.default_map.update(defaults)
 
 
 def _parse_perturbation_types(
@@ -97,7 +137,7 @@ def _parse_perturbation_types(
 
     Accepts both lowercase (``option_reorder``) and uppercase
     (``OPTION_REORDER``) names. Raises a ClickException if a name
-    cannot be resolved.
+    cannot be resolved or has no registered generator.
 
     Args:
         names: Tuple of perturbation type name strings.
@@ -106,19 +146,30 @@ def _parse_perturbation_types(
         Tuple of resolved PerturbationType enum members.
 
     Raises:
-        click.ClickException: If a name is not a valid perturbation type.
+        click.ClickException: If a name is not a valid perturbation type,
+            or no perturbation is registered under its value.
     """
+    registered = list_registered_perturbations()
     result: list[PerturbationType] = []
     for name in names:
         try:
-            result.append(PerturbationType[name.upper()])
+            pt = PerturbationType[name.upper()]
         except KeyError:
             try:
-                result.append(PerturbationType(name.lower()))
+                pt = PerturbationType(name.lower())
             except ValueError:
-                valid = [pt.value for pt in PerturbationType]
-                msg = f"Unknown perturbation type: {name!r}. Valid types: {valid}"
+                msg = (
+                    f"Unknown perturbation type: {name!r}. "
+                    f"Registered perturbations: {registered}"
+                )
                 raise click.ClickException(msg) from None
+        if pt.value not in registered:
+            msg = (
+                f"Perturbation type {pt.value!r} has no registered generator. "
+                f"Registered perturbations: {registered}"
+            )
+            raise click.ClickException(msg)
+        result.append(pt)
     return tuple(result)
 
 
@@ -135,7 +186,11 @@ def _dry_run_report(
     Validates that variants can be generated and a prompt rendered for
     the first MCQuestion in the dataset (so users learn about pipeline
     wiring bugs before paying for them), then prints a summary with an
-    estimated cost for known models.
+    estimated cost for known models. The call count is the number of
+    variants the run will generate: each perturbation type yields at
+    most ``num_variants`` per question, and fewer when it has fewer
+    distinct variants (for example, a 2-option question has one
+    reordering). Warns when the estimate exceeds ``max_budget_usd``.
     """
     mc_questions = [q for q in dataset if isinstance(q, MCQuestion)]
     if not mc_questions:
@@ -150,7 +205,9 @@ def _dry_run_report(
     sample_prompt = render_prompt(variants[0])
 
     num_questions = len(mc_questions)
-    num_calls = num_questions * config.num_variants
+    num_calls = sum(
+        len(generate_variants_for_question(q, config, seed)) for q in mc_questions
+    )
     estimated_usd = estimate_cost(config.model, num_calls)
     cost_str = (
         f"~${estimated_usd:.4f}" if estimated_usd > 0 else "unknown (model not priced)"
@@ -165,11 +222,19 @@ def _dry_run_report(
         + ", ".join(pt.value for pt in config.perturbation_types)
     )
     click.echo(f"  questions (MC):      {num_questions}")
-    click.echo(f"  variants per Q:      {config.num_variants}")
+    click.echo(f"  variants per type:   {config.num_variants} (max)")
     click.echo(f"  total provider calls:{num_calls}")
     click.echo(f"  estimated cost:      {cost_str}")
+    if config.max_budget_usd is not None:
+        click.echo(f"  budget:              ${config.max_budget_usd:.4f}")
     click.echo(f"  provider class:      {type(provider).__name__}")
     click.echo(f"  scorer class:        {type(scorer).__name__}")
+    if config.max_budget_usd is not None and estimated_usd > config.max_budget_usd:
+        click.echo(
+            f"Warning: the estimated cost (~${estimated_usd:.4f}) exceeds "
+            f"--max-budget-usd (${config.max_budget_usd:.4f}). The run will "
+            "stop with an error when the budget is reached."
+        )
     click.echo("")
     click.echo("Sample prompt (variant 0 of first question):")
     click.echo("  " + sample_prompt.replace("\n", "\n  "))
@@ -242,7 +307,10 @@ def cli(ctx: click.Context) -> None:
     "-o",
     type=click.Path(),
     default=None,
-    help="JSON output path",
+    help=(
+        "Report output path. Format follows the extension: .csv, .md, "
+        ".html, otherwise JSON"
+    ),
 )
 @click.option(
     "--perturbations",
@@ -273,7 +341,18 @@ def cli(ctx: click.Context) -> None:
     "--mca-threshold",
     type=click.FloatRange(min=0.0, max=1.0),
     default=1.0,
-    help="MCA threshold for pass/fail (0.0-1.0)",
+    help=(
+        "Consistency level c for MCA: a question passes when RC_correct >= c (0.0-1.0)"
+    ),
+)
+@click.option(
+    "--min-mca",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=1.0,
+    help=(
+        "Minimum MCA at --mca-threshold for a pass (0.0-1.0). The default "
+        "1.0 requires every question to pass"
+    ),
 )
 @click.option(
     "--core-threshold",
@@ -285,9 +364,25 @@ def cli(ctx: click.Context) -> None:
     "--max-budget-usd",
     type=click.FloatRange(min=0.0),
     default=None,
-    help="Budget ceiling in USD (>=0)",
+    help=(
+        "Spending cap in USD (>=0). The run stops with an error before a "
+        "request that would exceed it"
+    ),
 )
-@click.option("--ci", is_flag=True, help="CI mode: exit 1 on threshold failure")
+@click.option(
+    "--rpm",
+    type=click.IntRange(min=1),
+    default=60,
+    help="Provider rate limit in requests per minute (>=1)",
+)
+@click.option(
+    "--ci",
+    is_flag=True,
+    help=(
+        "CI mode: skip the console summary and exit 1 when a threshold "
+        "fails or any variant failed with a provider error"
+    ),
+)
 @click.option(
     "--dry-run",
     is_flag=True,
@@ -309,8 +404,10 @@ def run(
     seed: int,
     scorer: str,
     mca_threshold: float,
+    min_mca: float,
     core_threshold: float | None,
     max_budget_usd: float | None,
+    rpm: int,
     ci: bool,
     dry_run: bool,
 ) -> None:
@@ -328,11 +425,17 @@ def run(
         concurrency=concurrency,
         max_budget_usd=max_budget_usd,
         mca_threshold=mca_threshold,
+        min_mca=min_mca,
         core_threshold=core_threshold,
         ci_mode=ci,
     )
 
-    prov = get_provider(provider, model=model)
+    prov = get_provider(
+        provider,
+        model=model,
+        max_budget_usd=max_budget_usd,
+        requests_per_minute=rpm,
+    )
     ds = MCDataset.load(dataset_path)
     scoring = get_scorer(scorer)
 
@@ -341,11 +444,18 @@ def run(
         return
 
     if ci:
-        # CIRunner logs failed thresholds via the standard logging module
+        # CIRunner logs failed checks via the standard logging module
         # (visible by default thanks to Python's lastResort handler) and
-        # exposes them on .failures for programmatic access.
+        # exposes them on .failures for programmatic access. The report
+        # is written before exiting so a failed build still has it.
         ci_runner = CIRunner()
         exit_code = asyncio.run(ci_runner.run(ds, config, prov, scoring, seed=seed))
+        if output and ci_runner.last_report is not None:
+            _export_report(
+                ci_runner.last_report,
+                Path(output),
+                metadata=ci_runner.last_metadata,
+            )
         raise SystemExit(exit_code)
 
     runner = BatchRunner()
@@ -403,7 +513,11 @@ def compare(config: str, output: str | None, output_format: str) -> None:
     """Compare multiple models on the same evaluation."""
     from pathlib import Path  # noqa: PLC0415
 
-    data = load_config_file(Path(config))
+    try:
+        data = load_config_file(Path(config))
+        check_config_keys(data, _COMPARE_KEYS)
+    except ValidationError as exc:
+        raise click.ClickException(f"Config error: {exc}") from None
 
     # Validate models key
     models = data.get("models")
@@ -424,14 +538,54 @@ def compare(config: str, output: str | None, output_format: str) -> None:
     if not dataset_path:
         msg = "Config must contain 'dataset' path"
         raise click.ClickException(msg)
+    seed: int = int(data.get("seed", 42))
+    mca_threshold: float = float(data.get("mca_threshold", 1.0))
 
+    # Load dataset once
+    ds = MCDataset.load(dataset_path)
+    runs = _compare_runs(data, models)
+    scoring = get_scorer(runs[0][0].scorer)
+
+    out_dir: Path | None = None
+    if output:
+        out_dir = Path(output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    stems = _report_file_stems([cfg.model for cfg, _ in runs])
+
+    # Run per model sequentially, exporting each report as soon as it is
+    # ready so a later failure does not lose earlier results.
+    reports: list[EvaluationReport] = []
+    for (eval_config, prov), stem in zip(runs, stems, strict=True):
+        runner = BatchRunner()
+        report = asyncio.run(runner.run(ds, eval_config, prov, scoring, seed=seed))
+        reports.append(report)
+
+        click.echo(f"\nModel: {eval_config.model} ({eval_config.provider})")
+        ConsoleReporter().display(report)
+        if out_dir is not None:
+            path = out_dir / f"{stem}.{output_format.lower()}"
+            _export_report(report, path, metadata=runner.last_metadata)
+            click.echo(f"Report written to {path}")
+
+    _print_comparison(reports, mca_threshold)
+
+
+def _compare_runs(
+    data: dict[str, Any],
+    models: list[dict[str, Any]],
+) -> list[tuple[EvaluationConfig, BaseLLMProvider]]:
+    """Build the config and provider for each model in a compare config.
+
+    Everything is built before the first paid call, so an unknown
+    provider, a missing SDK or an unpriced model fails fast.
+    """
     pert_names = tuple(data.get("perturbations", ["option_reorder"]))
     pert_types = _parse_perturbation_types(pert_names)
     num_variants: int = int(data.get("num_variants", 5))
     concurrency: int = int(data.get("concurrency", 10))
     scorer_name: str = str(data.get("scorer", "exact_match"))
-    seed: int = int(data.get("seed", 42))
     mca_threshold: float = float(data.get("mca_threshold", 1.0))
+    min_mca: float = float(data.get("min_mca", 1.0))
     core_threshold_raw = data.get("core_threshold")
     core_threshold: float | None = (
         float(core_threshold_raw) if core_threshold_raw is not None else None
@@ -440,17 +594,15 @@ def compare(config: str, output: str | None, output_format: str) -> None:
     max_budget_usd: float | None = (
         float(max_budget_raw) if max_budget_raw is not None else None
     )
+    rpm: int = int(data.get("rpm", 60))
+    if rpm < 1:
+        msg = "Config error: 'rpm' must be >= 1"
+        raise click.ClickException(msg)
 
-    # Load dataset once
-    ds = MCDataset.load(dataset_path)
-    scoring = get_scorer(scorer_name)
-
-    # Run per model sequentially
-    results_list: list[tuple[str, Any]] = []
+    runs: list[tuple[EvaluationConfig, BaseLLMProvider]] = []
     for entry in models:
         model_name = str(entry["model"])
         provider_name = str(entry["provider"])
-
         eval_config = EvaluationConfig(
             model=model_name,
             provider=provider_name,
@@ -460,33 +612,73 @@ def compare(config: str, output: str | None, output_format: str) -> None:
             concurrency=concurrency,
             max_budget_usd=max_budget_usd,
             mca_threshold=mca_threshold,
+            min_mca=min_mca,
             core_threshold=core_threshold,
         )
+        prov = get_provider(
+            provider_name,
+            model=model_name,
+            max_budget_usd=max_budget_usd,
+            requests_per_minute=rpm,
+        )
+        runs.append((eval_config, prov))
+    return runs
 
-        prov = get_provider(provider_name, model=model_name)
-        runner = BatchRunner()
-        report = asyncio.run(runner.run(ds, eval_config, prov, scoring, seed=seed))
-        results_list.append((model_name, report))
 
-    # Display comparison summary
-    click.echo("\n--- Comparison Results ---\n")
-    for model_name, report in results_list:
-        click.echo(f"Model: {model_name}")
-        ConsoleReporter().display(report, threshold=mca_threshold)
-        click.echo("")
+def _report_file_stems(model_names: list[str]) -> list[str]:
+    """Return a distinct, filesystem-safe file stem for each model name.
 
-    # Export per-model reports in the requested format if --output is set.
-    if output:
-        out_dir = Path(output)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ext = {
-            "json": ".json",
-            "csv": ".csv",
-            "md": ".md",
-            "html": ".html",
-        }[output_format.lower()]
-        for model_name, report in results_list:
-            _export_report(report, out_dir / f"{model_name}{ext}")
+    Runs of characters outside ``[A-Za-z0-9._-]`` become ``_`` and
+    leading dots are dropped, so ``openai/gpt-4o-mini`` becomes
+    ``openai_gpt-4o-mini``. Stems that collide, compared
+    case-insensitively for macOS and Windows, get ``-2``, ``-3``, ...
+    suffixes.
+    """
+    stems: list[str] = []
+    seen: set[str] = set()
+    for name in model_names:
+        base = _UNSAFE_FILENAME_CHARS.sub("_", name).lstrip(".") or "model"
+        stem = base
+        suffix = 1
+        while stem.casefold() in seen:
+            suffix += 1
+            stem = f"{base}-{suffix}"
+        seen.add(stem.casefold())
+        stems.append(stem)
+    return stems
+
+
+def _print_comparison(reports: list[EvaluationReport], threshold: float) -> None:
+    """Print one row of headline metrics per model.
+
+    Columns are CORE, MCA at *threshold*, mean RC_correct, mean
+    RC_agree, and the p-value of McNemar's exact test
+    (:func:`compare_mca_paired`) against the first model.
+    """
+    mca_header = f"MCA({threshold:.2f})"
+    width = max(len("Model"), *(len(r.config.model) for r in reports))
+    header = (
+        f"{'Model':<{width}}  {'CORE':>6}  {mca_header:>9}  "
+        f"{'RC_correct':>10}  {'RC_agree':>8}  {'p-value':>7}"
+    )
+    click.echo(
+        f"\nComparison (p-value: McNemar exact test on MCA({threshold:.2f}) "
+        f"pass/fail against {reports[0].config.model})"
+    )
+    click.echo(header)
+    click.echo("-" * len(header))
+    for i, report in enumerate(reports):
+        if i == 0:
+            p_value = "-"
+        else:
+            paired = compare_mca_paired(reports[0].results, report.results, threshold)
+            p_value = f"{paired.p_value:.4f}"
+        click.echo(
+            f"{report.config.model:<{width}}  {core_index(report.results):>6.4f}  "
+            f"{mca(report.results, threshold):>9.4f}  "
+            f"{report.mean_rc_correct:>10.4f}  {report.mean_rc_agree:>8.4f}  "
+            f"{p_value:>7}"
+        )
 
 
 @cli.group()

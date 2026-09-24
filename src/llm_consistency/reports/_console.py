@@ -14,6 +14,7 @@ from rich.table import Table
 
 from llm_consistency.metrics import car_curve, core_index, mca
 from llm_consistency.reports._car_ascii import render_car_ascii
+from llm_consistency.runners._ci import count_error_variants
 
 if TYPE_CHECKING:
     from llm_consistency.types import EvaluationReport
@@ -23,8 +24,12 @@ class ConsoleReporter:
     """Rich-formatted terminal reporter for evaluation results.
 
     Displays a summary table with CORE, MCA, mean_rc_correct, and
-    mean_rc_agree metrics, each with a color-coded pass/fail status.
-    Also renders an ASCII CAR curve in a Rich Panel.
+    mean_rc_agree metrics. CORE and MCA carry a color-coded pass/fail
+    status computed with the same rule as the CI gate
+    (:func:`~llm_consistency.runners._ci.gate_failures`); the two means
+    are informational. A row with the number of failed variants is
+    added when any provider call failed. Also renders an ASCII CAR
+    curve in a Rich Panel.
 
     Args:
         console: Optional Rich Console instance for output capture.
@@ -47,15 +52,17 @@ class ConsoleReporter:
 
         Args:
             report: The evaluation report to display.
-            threshold: Optional override for MCA threshold.
+            threshold: Optional override for the MCA consistency level c.
                 Defaults to ``report.config.mca_threshold``.
         """
-        mca_threshold = threshold or report.config.mca_threshold
-        core_threshold = report.config.core_threshold
+        config = report.config
+        mca_threshold = threshold if threshold is not None else config.mca_threshold
+        core_threshold = config.core_threshold
 
         # Compute metrics
         core_val = core_index(report.results)
         mca_val = mca(report.results, mca_threshold)
+        errors = count_error_variants(report.results)
 
         # Build summary table
         table = Table(title="Evaluation Summary")
@@ -63,29 +70,28 @@ class ConsoleReporter:
         table.add_column("Value", justify="right")
         table.add_column("Status", justify="center")
 
-        # CORE row
-        core_status = _pass_fail(
-            core_val, core_threshold if core_threshold is not None else 0.0
+        # CORE row: only gated when a CORE threshold is set
+        core_status = (
+            "n/a" if core_threshold is None else _pass_fail(core_val, core_threshold)
         )
         table.add_row("CORE", f"{core_val:.4f}", core_status)
 
-        # MCA row
-        mca_status = _pass_fail(mca_val, mca_threshold)
-        table.add_row("MCA", f"{mca_val:.4f}", mca_status)
-
-        # mean_rc_correct row
+        # MCA row: passes when MCA(c) reaches min_mca
         table.add_row(
-            "Mean RC Correct",
-            f"{report.mean_rc_correct:.4f}",
-            _pass_fail(report.mean_rc_correct, mca_threshold),
+            f"MCA({mca_threshold:.2f})",
+            f"{mca_val:.4f}",
+            _pass_fail(mca_val, config.min_mca),
         )
 
-        # mean_rc_agree row
-        table.add_row(
-            "Mean RC Agree",
-            f"{report.mean_rc_agree:.4f}",
-            _pass_fail(report.mean_rc_agree, 0.5),
-        )
+        table.add_row("Mean RC Correct", f"{report.mean_rc_correct:.4f}", "")
+        table.add_row("Mean RC Agree", f"{report.mean_rc_agree:.4f}", "")
+
+        if errors:
+            table.add_row(
+                "Failed variants",
+                f"{errors} / {report.total_variants}",
+                "[red]FAIL[/]",
+            )
 
         self._console.print(table)
 

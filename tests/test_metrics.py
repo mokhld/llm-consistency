@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import pytest
 
 from llm_consistency.metrics import (
@@ -16,6 +18,9 @@ from llm_consistency.metrics import (
     trapezoidal_auc,
 )
 from llm_consistency.types import QuestionConsistencyResult
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class TestBuildQuestionConsistencyResult:
@@ -1038,10 +1043,20 @@ class TestValidateSampleSize:
             "effect_size",
             "alpha",
             "target_power",
+            "power_at_n",
             "observed_power",
             "recommended_n",
         }
         assert all(isinstance(v, float) for v in out.values())
+
+    def test_power_at_n_equals_observed_power(self) -> None:
+        """``observed_power`` is kept as an alias of ``power_at_n``."""
+        from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
+
+        out = validate_sample_size(n=500, effect_size=0.2)
+        assert out["power_at_n"] == out["observed_power"]
+        # Phi(0.2 * sqrt(500) - 1.959964) = Phi(2.512172)
+        assert out["power_at_n"] == pytest.approx(0.9940005, abs=1e-6)
 
     def test_recommended_n_matches_cohen_h(self) -> None:
         """Cohen's h=0.5, alpha=0.05 (two-sided), power=0.80 -> n=32."""
@@ -1073,8 +1088,9 @@ class TestValidateSampleSize:
     def test_warns_when_n_below_200(self) -> None:
         from llm_consistency.metrics import validate_sample_size  # noqa: PLC0415
 
-        with pytest.warns(UserWarning, match="below the typical guidance"):
+        with pytest.warns(UserWarning, match="rule of thumb") as record:
             validate_sample_size(n=100, effect_size=0.5)
+        assert "Cavalin" not in str(record[0].message)
 
     def test_no_warning_at_or_above_200(self) -> None:
         import warnings as _w  # noqa: PLC0415
@@ -1254,6 +1270,62 @@ class TestCompareMcaPaired:
         assert out.statistic == 1.0
         assert out.p_value == pytest.approx(1.0)
 
+    def test_more_than_1074_discordant_pairs_does_not_overflow(self) -> None:
+        """0.5**n underflowed past n = 1074 and the tail sum overflowed."""
+        from llm_consistency.metrics import compare_mca_paired  # noqa: PLC0415
+
+        a = self._qcrs({f"q{i}": 1.0 if i < 600 else 0.0 for i in range(1100)})
+        b = self._qcrs({f"q{i}": 0.0 if i < 600 else 1.0 for i in range(1100)})
+        out = compare_mca_paired(a, b, threshold=0.8)
+        assert out.n_discordant == 1100
+        assert out.statistic == 500.0
+        assert out.p_value == pytest.approx(_exact_mcnemar_p(600, 500), rel=1e-15)
+
+    @pytest.mark.parametrize(
+        ("b", "c", "expected"),
+        [
+            # Exact two-sided p-values; for p = 0.5 these equal
+            # scipy.stats.binomtest(min(b, c), b + c).pvalue.
+            (1, 5, 0.21875),
+            (3, 12, 0.03515625),
+            (7, 13, 0.26317596435546875),
+            (2, 18, 0.0004024505615234375),
+            (18, 32, 0.06490864707227217),
+            (10, 40, 2.3861331676755526e-05),
+            (24, 26, 0.887724827340783),
+            (0, 50, 1.7763568394002505e-15),
+            (0, 1, 1.0),
+            (5, 5, 1.0),
+            (0, 0, 1.0),
+        ],
+    )
+    def test_exact_p_matches_binomial_test(
+        self, b: int, c: int, expected: float
+    ) -> None:
+        from llm_consistency.metrics import _mcnemar_exact_p  # noqa: PLC0415
+
+        assert _mcnemar_exact_p(b, c) == expected
+        assert _mcnemar_exact_p(c, b) == expected
+
+    @pytest.mark.parametrize(("b", "c"), [(537, 537), (990, 1010), (900, 1100)])
+    def test_exact_p_around_2000_pairs(self, b: int, c: int) -> None:
+        from llm_consistency.metrics import _mcnemar_exact_p  # noqa: PLC0415
+
+        assert _mcnemar_exact_p(b, c) == _exact_mcnemar_p(b, c)
+
+    def test_exact_p_around_1e5_pairs(self) -> None:
+        """Near-balanced, 100,000 discordant pairs: exact and still fast."""
+        import math  # noqa: PLC0415
+        import statistics  # noqa: PLC0415
+
+        from llm_consistency.metrics import _mcnemar_exact_p  # noqa: PLC0415
+
+        b, c = 49_000, 51_000
+        z = (abs(b - c) - 1) / math.sqrt(b + c)
+        normal_approx = 2 * (1 - statistics.NormalDist().cdf(z))
+        assert _mcnemar_exact_p(b, c) == pytest.approx(normal_approx, rel=1e-2)
+        assert _mcnemar_exact_p(10, 99_990) == 0.0  # underflows, no error
+
     def test_paired_test_result_exposed_at_top_level(self) -> None:
         import llm_consistency  # noqa: PLC0415
 
@@ -1261,6 +1333,16 @@ class TestCompareMcaPaired:
         assert hasattr(llm_consistency, "compare_mca_paired")
         assert "PairedTestResult" in llm_consistency.__all__
         assert "compare_mca_paired" in llm_consistency.__all__
+
+
+def _exact_mcnemar_p(b: int, c: int) -> float:
+    """Reference two-sided exact McNemar p-value via rational arithmetic."""
+    import math  # noqa: PLC0415
+    from fractions import Fraction  # noqa: PLC0415
+
+    n = b + c
+    tail = sum(math.comb(n, i) for i in range(min(b, c) + 1))
+    return float(min(Fraction(1), Fraction(2 * tail, 2**n)))
 
 
 class TestPerturbationImpact:
@@ -1417,3 +1499,250 @@ class TestPerturbationImpact:
 
         assert hasattr(llm_consistency, "perturbation_impact")
         assert "perturbation_impact" in llm_consistency.__all__
+
+
+# ── Input validation (A18) ──
+
+
+class TestMetricInputValidation:
+    """Out-of-range thresholds and CI settings raise ValidationError."""
+
+    @pytest.mark.parametrize("threshold", [-0.1, 1.5, float("nan")])
+    def test_mca_threshold_out_of_range(self, threshold: float) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="threshold must be in"):
+            mca([_qcr("q1", 1.0)], threshold)
+
+    def test_car_curve_threshold_out_of_range(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="threshold must be in"):
+            car_curve([_qcr("q1", 1.0)], thresholds=[0.0, 0.5, 2.0])
+
+    def test_car_curve_accepts_partial_grid(self) -> None:
+        curve = car_curve([_qcr("q1", 0.6)], thresholds=[0.7, 0.4])
+        assert curve == [(0.4, 1.0), (0.7, 0.0)]
+
+    @pytest.mark.parametrize(
+        "thresholds",
+        [[0.1, 0.5, 1.0], [0.0, 0.5, 0.9], [0.0, 2.0], [-1.0, 0.0, 1.0], []],
+    )
+    def test_core_index_rejects_bad_grid(self, thresholds: list[float]) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="threshold"):
+            core_index([_qcr("q1", 1.0)], thresholds=thresholds)
+
+    def test_core_index_empty_is_positive_zero(self) -> None:
+        import math  # noqa: PLC0415
+
+        value = core_index([])
+        assert value == 0.0
+        assert math.copysign(1.0, value) == 1.0
+
+    def test_core_index_stays_in_unit_interval(self) -> None:
+        results = _mixed_results(n=50, seed=3)
+        for thresholds in (None, [0.0, 1.0], [1.0, 0.3, 0.0, 0.95]):
+            assert 0.0 <= core_index(results, thresholds) <= 1.0
+
+    def test_aga_tau_out_of_range(self) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+
+        with pytest.raises(ValidationError, match="tau_agree must be in"):
+            agreement_gated_accuracy([_qcr("q1", 1.0)], 1.2)
+
+    @pytest.mark.parametrize("confidence", [0.0, 1.0, 1.5, -0.2])
+    def test_ci_confidence_out_of_range(self, confidence: float) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            bootstrap_ci_bca,
+            car_curve_with_ci,
+            mca_with_ci,
+        )
+
+        results = _mixed_results(n=10)
+        with pytest.raises(ValidationError, match="confidence must be in"):
+            bootstrap_ci(results, lambda r: mca(r, 0.5), confidence=confidence)
+        with pytest.raises(ValidationError, match="confidence must be in"):
+            bootstrap_ci_bca(results, lambda r: mca(r, 0.5), confidence=confidence)
+        with pytest.raises(ValidationError, match="confidence must be in"):
+            mca_with_ci(results, 0.5, confidence=confidence)
+        with pytest.raises(ValidationError, match="confidence must be in"):
+            car_curve_with_ci(results, confidence=confidence)
+
+    @pytest.mark.parametrize("n_bootstrap", [0, -5])
+    def test_ci_n_bootstrap_below_one(self, n_bootstrap: int) -> None:
+        from llm_consistency._exceptions import ValidationError  # noqa: PLC0415
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            bootstrap_ci_bca,
+            core_index_with_ci,
+        )
+
+        results = _mixed_results(n=10)
+        with pytest.raises(ValidationError, match="n_bootstrap must be >= 1"):
+            bootstrap_ci(results, lambda r: mca(r, 0.5), n_bootstrap=n_bootstrap)
+        with pytest.raises(ValidationError, match="n_bootstrap must be >= 1"):
+            bootstrap_ci_bca(results, lambda r: mca(r, 0.5), n_bootstrap=n_bootstrap)
+        with pytest.raises(ValidationError, match="n_bootstrap must be >= 1"):
+            core_index_with_ci(results, n_bootstrap=n_bootstrap)
+
+
+# ── Bootstrap: tie handling and the closed-form fast path (A15) ──
+
+
+def _discrete_results(n: int, seed: int) -> list[QuestionConsistencyResult]:
+    """QCRs with rc_correct on the k/5 grid, so MCA resamples tie often."""
+    import random as _r  # noqa: PLC0415
+
+    rng = _r.Random(seed)
+    out = []
+    for i in range(n):
+        correct = rng.choices(range(6), weights=[8, 5, 5, 7, 12, 63])[0]
+        out.append(
+            QuestionConsistencyResult(
+                question_id=f"q{i}",
+                rc_correct=correct / 5,
+                rc_agree=max(correct, 5 - correct, rng.randint(2, 5)) / 5,
+                total_variants=5,
+                correct_count=correct,
+            )
+        )
+    return out
+
+
+class TestBootstrapFastPath:
+    """Built-in *_with_ci match the generic bootstrap on the scalar metric."""
+
+    @pytest.mark.parametrize("n", [1, 2, 7, 40, 150])
+    @pytest.mark.parametrize("method", ["bca", "percentile"])
+    @pytest.mark.parametrize("make", [_discrete_results, _mixed_results])
+    def test_matches_generic_bootstrap(
+        self,
+        n: int,
+        method: str,
+        make: Callable[..., list[QuestionConsistencyResult]],
+    ) -> None:
+        import functools  # noqa: PLC0415
+
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            agreement_gated_accuracy_with_ci,
+            bootstrap_ci_bca,
+            car_curve_with_ci,
+            core_index_with_ci,
+            mca_with_ci,
+        )
+
+        results = make(n, seed=n)
+        kw: dict[str, Any] = {
+            "n_bootstrap": 200,
+            "confidence": 0.9,
+            "seed": n,
+            "method": method,
+        }
+        grid = [1.0, 0.25, 0.0, 0.6]
+        cases = [
+            (mca_with_ci(results, 0.6, **kw), functools.partial(mca, threshold=0.6)),
+            (core_index_with_ci(results, **kw), core_index),
+            (
+                core_index_with_ci(results, grid, **kw),
+                functools.partial(core_index, thresholds=grid),
+            ),
+            (
+                agreement_gated_accuracy_with_ci(results, 0.6, **kw),
+                functools.partial(agreement_gated_accuracy, tau_agree=0.6),
+            ),
+        ]
+        cases += [
+            (point, functools.partial(mca, threshold=c))
+            for c, point in car_curve_with_ci(results, **kw)
+        ]
+
+        generic = bootstrap_ci_bca if method == "bca" else bootstrap_ci
+        for fast, stat in cases:
+            lo, hi = generic(results, stat, 200, 0.9, n)
+            assert (fast.ci_lower, fast.ci_upper) == (
+                min(lo, fast.value),
+                max(hi, fast.value),
+            )
+
+    def test_large_n_is_not_quadratic(self) -> None:
+        """At n=20,000 the old O(n^2) jackknife took minutes for CORE."""
+        import time  # noqa: PLC0415
+
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            car_curve_with_ci,
+            core_index_with_ci,
+            mca_with_ci,
+        )
+
+        results = _discrete_results(20_000, seed=1)
+        start = time.perf_counter()
+        core = core_index_with_ci(results, n_bootstrap=50, seed=1)
+        mca_ci = mca_with_ci(results, 0.8, n_bootstrap=50, seed=1)
+        curve = car_curve_with_ci(results, n_bootstrap=50, seed=1)
+        assert time.perf_counter() - start < 10.0
+        assert core.ci_lower < core.value < core.ci_upper
+        assert mca_ci.ci_lower < mca_ci.value < mca_ci.ci_upper
+        assert len(curve) == 11
+
+    def test_bca_counts_ties_as_half(self) -> None:
+        """Estimates tied with the observed value count half below it.
+
+        The estimates are symmetric about the observed value with no
+        acceleration, so the BCa interval equals the percentile interval.
+        Counting only strictly smaller estimates gives z0 < 0 and pulls
+        the upper bound down to 0.6.
+        """
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            _bca_bounds,
+            _percentile_bounds,
+        )
+
+        estimates = [0.3] * 10 + [0.4] * 20 + [0.5] * 40 + [0.6] * 20 + [0.7] * 10
+        bounds = _bca_bounds(estimates, 0.5, lambda: [0.0, 0.0], 0.9)
+        assert bounds == _percentile_bounds(estimates, 0.9) == (0.3, 0.7)
+
+    def test_bca_one_sided_estimates_fall_back_to_percentile(self) -> None:
+        """z0 is infinite when no estimate reaches the observed value."""
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            _bca_bounds,
+            _percentile_bounds,
+        )
+
+        def no_jackknife() -> list[float]:
+            raise AssertionError("jackknife should not be needed")
+
+        estimates = [0.1, 0.2, 0.2, 0.3, 0.4]
+        bounds = _bca_bounds(estimates, 0.9, no_jackknife, 0.9)
+        assert bounds == _percentile_bounds(estimates, 0.9)
+
+    def test_all_pass_interval_is_degenerate(self) -> None:
+        from llm_consistency.metrics import mca_with_ci  # noqa: PLC0415
+
+        results = [_qcr(f"q{i}", 1.0) for i in range(30)]
+        r = mca_with_ci(results, 1.0, n_bootstrap=100, seed=1)
+        assert (r.ci_lower, r.value, r.ci_upper) == (1.0, 1.0, 1.0)
+
+    def test_empty_results(self) -> None:
+        from llm_consistency.metrics import (  # noqa: PLC0415
+            agreement_gated_accuracy_with_ci,
+            car_curve_with_ci,
+            core_index_with_ci,
+            mca_with_ci,
+        )
+
+        for method in ("bca", "percentile"):
+            for r in (
+                mca_with_ci([], 0.5, n_bootstrap=10, method=method),  # type: ignore[arg-type]
+                core_index_with_ci([], n_bootstrap=10, method=method),  # type: ignore[arg-type]
+                agreement_gated_accuracy_with_ci(
+                    [],
+                    0.5,
+                    n_bootstrap=10,
+                    method=method,  # type: ignore[arg-type]
+                ),
+            ):
+                assert (r.value, r.ci_lower, r.ci_upper, r.n_samples) == (0, 0, 0, 0)
+            curve = car_curve_with_ci([], n_bootstrap=10, method=method)  # type: ignore[arg-type]
+            assert [m.ci_upper for _, m in curve] == [0.0] * 11

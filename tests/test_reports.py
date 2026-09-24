@@ -59,6 +59,30 @@ def _make_report(num_questions: int = 3) -> EvaluationReport:
     )
 
 
+def _report_with(rows: list[tuple[str, dict[str, int]]]) -> EvaluationReport:
+    """Build a report from (question_id, answer_distribution) pairs."""
+    base = _make_report(num_questions=1)
+    results = tuple(
+        QuestionConsistencyResult(
+            question_id=qid,
+            rc_correct=0.0,
+            rc_agree=1.0,
+            total_variants=sum(dist.values()),
+            correct_count=0,
+            answer_distribution=dist,
+        )
+        for qid, dist in rows
+    )
+    return EvaluationReport(
+        config=base.config,
+        results=results,
+        total_questions=len(results),
+        total_variants=sum(r.total_variants for r in results),
+        mean_rc_correct=0.0,
+        mean_rc_agree=1.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
@@ -137,6 +161,30 @@ class TestExportCsv:
         rows = list(csv.reader(out_path.open(encoding="utf-8", newline="")))
         assert len(rows) == 1  # header only
 
+    def test_formula_cells_are_prefixed(self, tmp_path: Path) -> None:
+        """Cells starting with = + - @ tab or CR are neutralised with a quote."""
+        hostile_ids = ["=1+1", "+SUM(A1)", "-2", "@cmd", "\tx", "\rx"]
+        report = _report_with(
+            [(qid, {'=HYPERLINK("http://x")': 1}) for qid in hostile_ids]
+        )
+        out_path = tmp_path / "report.csv"
+        export_csv(report, out_path)
+
+        with out_path.open(encoding="utf-8", newline="") as fh:
+            rows = list(csv.reader(fh))[1:]
+        assert [row[0] for row in rows] == ["'" + qid for qid in hostile_ids]
+        assert all(row[5] == '\'=HYPERLINK("http://x")=1' for row in rows)
+
+    def test_plain_cells_are_unchanged(self, tmp_path: Path) -> None:
+        report = _report_with([("q-1", {"A": 1})])
+        out_path = tmp_path / "report.csv"
+        export_csv(report, out_path)
+
+        with out_path.open(encoding="utf-8", newline="") as fh:
+            row = list(csv.reader(fh))[1]
+        assert row[0] == "q-1"
+        assert row[5] == "A=1"
+
 
 # ---------------------------------------------------------------------------
 # Markdown export
@@ -200,6 +248,31 @@ class TestExportMarkdown:
         export_markdown(report, out_path)
         assert list(tmp_path.glob("*.tmp")) == []
         assert out_path.exists()
+
+    def test_hostile_cells_cannot_break_the_table(self, tmp_path: Path) -> None:
+        """Pipes, backticks, newlines and HTML in cells are escaped."""
+        report = _report_with(
+            [
+                ("a|b\nc`d\\", {"<script>x</script>": 1}),
+                ("q2", {"line1\r\nline2 | `x`": 2}),
+            ]
+        )
+        out_path = tmp_path / "report.md"
+        export_markdown(report, out_path)
+        text = out_path.read_text(encoding="utf-8")
+
+        section = text.split("## Per-question results\n\n")[1].strip()
+        rows = section.splitlines()
+        # header + separator + one line per question: nothing split a row
+        assert len(rows) == 4
+        # every data row keeps exactly six cells (seven unescaped pipes)
+        for row in rows[2:]:
+            unescaped = row.replace("\\\\", "").replace("\\|", "")
+            assert unescaped.count("|") == 7
+        assert "| a\\|b c\\`d\\\\ |" in rows[2]
+        assert "&lt;script&gt;x&lt;/script&gt;=1" in rows[2]
+        assert "<script>" not in text
+        assert "line1 line2 \\| \\`x\\`=2" in rows[3]
 
 
 # ---------------------------------------------------------------------------
