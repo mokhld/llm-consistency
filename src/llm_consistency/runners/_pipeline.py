@@ -10,13 +10,14 @@ import re
 import warnings
 from collections import Counter
 from dataclasses import replace
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from llm_consistency import perturbations
 from llm_consistency.metrics import build_question_consistency_result
 from llm_consistency.providers._budget import BudgetExceededError
 from llm_consistency.scoring import _extract_mc_answer
 from llm_consistency.types import (
+    GenerationParams,
     LLMResponse,
     MCQuestion,
     PresentedOption,
@@ -40,6 +41,16 @@ _MAX_ERROR_CHARS = 200
 # API keys in the shapes the supported SDKs echo back ("sk-...", "sk-ant-...",
 # masked "sk-abc***xyz") and bearer tokens.
 _SECRET = re.compile(r"(?<![\w-])sk-[\w*-]{8,}|Bearer\s+\S+")
+
+# Prompt template used when ``EvaluationConfig.prompt_template`` is None.
+# ``{question}`` is the rendered question and options, ``{labels}`` the
+# option labels shown, comma separated. It is modelled on the fixed
+# first-line answer instruction of the CAT paper (section 4.1).
+DEFAULT_PROMPT_TEMPLATE = (
+    "{question}\n\n"
+    "Answer with the label of the correct option. The first line of your "
+    'response must be "Answer: X", where X is one of {labels}.'
+)
 
 
 def generate_variants_for_question(
@@ -71,24 +82,43 @@ def generate_variants_for_question(
     return all_variants
 
 
-def render_prompt(variant: PerturbedVariant) -> str:
+def render_prompt(
+    variant: PerturbedVariant,
+    template: str | None = None,
+    labels: Sequence[str] | None = None,
+) -> str:
     """Render a perturbed variant into a prompt string.
 
-    For variants with ``options is not None`` (e.g., option_reorder),
-    renders the stem plus options in ``A. text`` format.  For variants
-    with ``options is None`` (e.g., format_change, separator_change),
-    returns ``variant.stem`` directly since options are already embedded.
+    The question part is the stem plus options in ``A. text`` format for
+    variants with ``options is not None`` (e.g., option_reorder), and
+    ``variant.stem`` for variants with ``options is None`` (e.g.,
+    format_change, separator_change), whose options are already embedded.
+    It is then placed in *template*.
 
     Args:
         variant: The perturbed variant to render.
+        template: Prompt template with a ``{question}`` placeholder and an
+            optional ``{labels}`` placeholder.  ``None`` uses
+            :data:`DEFAULT_PROMPT_TEMPLATE`; pass ``"{question}"`` for
+            the question alone.
+        labels: The option labels shown to the model, joined with ``", "``
+            for ``{labels}``.  Defaults to the labels of
+            ``variant.presented_options``, or of ``variant.options``.
 
     Returns:
         The prompt string ready to send to an LLM.
     """
     if variant.options is not None:
         lines = [f"{o.label}. {o.text}" for o in variant.options]
-        return f"{variant.stem}\n{chr(10).join(lines)}"
-    return variant.stem
+        question = f"{variant.stem}\n{chr(10).join(lines)}"
+    else:
+        question = variant.stem
+    if labels is None:
+        shown = variant.presented_options or variant.options or ()
+        labels = [o.label for o in shown]
+    if template is None:
+        template = DEFAULT_PROMPT_TEMPLATE
+    return template.format(question=question, labels=", ".join(labels))
 
 
 def build_scored_qcr(
@@ -163,6 +193,25 @@ def presented_options(
         )
         for o in options
     )
+
+
+def query_kwargs(config: EvaluationConfig) -> dict[str, Any]:
+    """Return the ``system`` and ``generation`` arguments for ``provider.query``.
+
+    Each is left out when the config does not set it, so a provider that
+    overrides ``query`` without these keyword arguments keeps working.
+    """
+    kwargs: dict[str, Any] = {}
+    if config.system_prompt is not None:
+        kwargs["system"] = config.system_prompt
+    generation = GenerationParams(
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        seed=config.generation_seed,
+    )
+    if generation != GenerationParams():
+        kwargs["generation"] = generation
+    return kwargs
 
 
 def describe_error(exc: BaseException) -> str:
@@ -275,12 +324,14 @@ async def process_question(
     """
     variants = generate_variants_for_question(question, config, seed)
     variant_qids = [f"{question.id}_v{i}" for i in range(len(variants))]
+    variant_options = [presented_options(v, question) for v in variants]
+    kwargs = query_kwargs(config)
 
     async def _query(prompt: str, qid: str) -> tuple[str, str | None]:
         """Return ``(raw_output, error)`` for one variant."""
         async with semaphore:
             try:
-                resp = await provider.query(prompt, qid)
+                resp = await provider.query(prompt, qid, **kwargs)
             except BudgetExceededError:
                 raise
             except Exception as exc:
@@ -290,14 +341,14 @@ async def process_question(
         return (resp.raw_output, None)
 
     outputs = await gather_or_cancel(
-        _query(render_prompt(v), qid)
-        for v, qid in zip(variants, variant_qids, strict=True)
+        _query(render_prompt(v, config.prompt_template, [o.label for o in opts]), qid)
+        for v, opts, qid in zip(variants, variant_options, variant_qids, strict=True)
     )
 
     scored_responses: list[ScoredResponse] = []
     variant_data: list[tuple[str, bool]] = []
-    for variant, variant_qid, (raw_output, error) in zip(
-        variants, variant_qids, outputs, strict=True
+    for variant, options, variant_qid, (raw_output, error) in zip(
+        variants, variant_options, variant_qids, outputs, strict=True
     ):
         pt_value = variant.perturbation_type.value
         if error is not None:
@@ -313,7 +364,6 @@ async def process_question(
             variant_data.append((f"<error:{variant_qid}>", False))
             continue
 
-        options = presented_options(variant, question)
         response = LLMResponse(
             question_id=variant_qid,
             raw_output=raw_output,

@@ -6,7 +6,7 @@ import pytest
 
 from llm_consistency.providers import get_provider
 from llm_consistency.providers._mock import MockLLMProvider
-from llm_consistency.types import LLMResponse
+from llm_consistency.types import GenerationParams, LLMResponse
 
 
 class TestMockProviderConstruction:
@@ -36,6 +36,17 @@ class TestDefaultResponse:
         provider = MockLLMProvider(model="mock", default_response="B")
         response = await provider.query("any prompt", "q1")
         assert response.raw_output == "B"
+
+    @pytest.mark.asyncio
+    async def test_accepts_system_and_generation(self) -> None:
+        provider = MockLLMProvider(model="mock")
+        response = await provider.query(
+            "any prompt",
+            "q1",
+            system="Be careful.",
+            generation=GenerationParams(temperature=0.0),
+        )
+        assert response.raw_output == "A"
 
 
 class TestResponseMapMode:

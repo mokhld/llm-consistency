@@ -8,6 +8,7 @@ with a clear installation hint.
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -17,6 +18,9 @@ from llm_consistency.providers._base import (
     _RawResponse,
 )
 from llm_consistency.providers._retry import is_retryable_status
+
+if TYPE_CHECKING:
+    from llm_consistency.types import GenerationParams
 
 
 class OllamaProvider(BaseLLMProvider):  # pragma: no cover
@@ -75,6 +79,7 @@ class OllamaProvider(BaseLLMProvider):  # pragma: no cover
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         """Send a single chat request to the local Ollama server.
 
@@ -82,6 +87,8 @@ class OllamaProvider(BaseLLMProvider):  # pragma: no cover
         - ``prompt_eval_count`` -> ``prompt_tokens``
         - ``eval_count`` -> ``completion_tokens``
         - Response uses dict-style access for max compatibility.
+        - Generation settings that are set go in ``options`` as
+          ``temperature``, ``num_predict`` and ``seed``.
 
         Raises:
             EmptyResponseError: If the model produced reasoning in
@@ -92,10 +99,21 @@ class OllamaProvider(BaseLLMProvider):  # pragma: no cover
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        options: dict[str, Any] = {}
+        if generation is not None:
+            if generation.temperature is not None:
+                options["temperature"] = generation.temperature
+            if generation.max_tokens is not None:
+                options["num_predict"] = generation.max_tokens
+            if generation.seed is not None:
+                options["seed"] = generation.seed
+        chat_kwargs: dict[str, Any] = {"options": options} if options else {}
+
         t0 = time.monotonic()
         response = await self._client.chat(
             model=self._model,
             messages=messages,
+            **chat_kwargs,
         )
         latency_ms = (time.monotonic() - t0) * 1000
 

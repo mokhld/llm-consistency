@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from llm_consistency.providers._base import EmptyResponseError, _RawResponse
+from llm_consistency.types import GenerationParams
 
 
 def _import_ollama_provider() -> type:
@@ -248,3 +249,38 @@ class TestOllamaSendRequest:
             provider = cls(model="qwen3")
             raw = await provider._send_request("prompt")
             assert raw.content == "B"
+
+
+# ---------------------------------------------------------------------------
+# Tests: generation settings
+# ---------------------------------------------------------------------------
+class TestOllamaGenerationParams:
+    @pytest.mark.parametrize(
+        ("generation", "expected"),
+        [
+            (None, None),
+            (GenerationParams(), None),
+            (GenerationParams(temperature=0.0), {"temperature": 0.0}),
+            (GenerationParams(max_tokens=64), {"num_predict": 64}),
+            (GenerationParams(seed=7), {"seed": 7}),
+            (
+                GenerationParams(temperature=0.5, max_tokens=64, seed=7),
+                {"temperature": 0.5, "num_predict": 64, "seed": 7},
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_options_sent_only_when_set(
+        self, generation: GenerationParams | None, expected: dict[str, Any] | None
+    ) -> None:
+        """Settings go in ``options``; no ``options`` key when none is set."""
+        mock_module, mock_client = _make_mock_ollama_module()
+        with patch.dict(sys.modules, {"ollama": mock_module}):
+            cls = _import_ollama_provider()
+            provider = cls(model="llama3")
+            await provider._send_request("prompt", generation=generation)
+            call_kwargs = mock_client.chat.call_args.kwargs
+            assert set(call_kwargs) - {"model", "messages"} == (
+                set() if expected is None else {"options"}
+            )
+            assert call_kwargs.get("options") == expected

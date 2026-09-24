@@ -58,13 +58,18 @@ CHECKPOINT_VERSION = 2
 
 # EvaluationConfig.to_dict() keys that change what a run produces. Only
 # these and the seed go into the checkpoint hash. Add new result-affecting
-# fields (prompt and decoding settings) here; each must be a to_dict() key.
+# fields here; each must be a to_dict() key.
 CONFIG_HASH_FIELDS: tuple[str, ...] = (
     "model",
     "provider",
     "perturbation_types",
     "scorer",
     "num_variants",
+    "prompt_template",
+    "system_prompt",
+    "temperature",
+    "max_tokens",
+    "generation_seed",
 )
 
 

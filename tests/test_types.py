@@ -14,6 +14,7 @@ from llm_consistency.types import (
     KNOWN_SCORERS,
     EvaluationConfig,
     EvaluationReport,
+    GenerationParams,
     LLMResponse,
     MCOption,
     MCQuestion,
@@ -1119,6 +1120,108 @@ class TestEvaluationConfig:
             )
 
 
+def _config(**kwargs: object) -> EvaluationConfig:
+    return EvaluationConfig(
+        model="gpt-4o",
+        provider="openai",
+        perturbation_types=(PerturbationType.OPTION_REORDER,),
+        scorer="exact_match",
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+_PROMPT_FIELDS = (
+    "prompt_template",
+    "system_prompt",
+    "temperature",
+    "max_tokens",
+    "generation_seed",
+)
+
+
+class TestEvaluationConfigPromptContract:
+    """Prompt template, system prompt and decoding settings (B1)."""
+
+    def test_defaults_are_none(self) -> None:
+        cfg = _config()
+        for name in _PROMPT_FIELDS:
+            assert getattr(cfg, name) is None
+
+    def test_round_trip(self) -> None:
+        cfg = _config(
+            prompt_template="Q: {question}\nPick one of {labels}.",
+            system_prompt="You are careful.",
+            temperature=0.0,
+            max_tokens=256,
+            generation_seed=7,
+        )
+        d = cfg.to_dict()
+        assert {name: d[name] for name in _PROMPT_FIELDS} == {
+            "prompt_template": "Q: {question}\nPick one of {labels}.",
+            "system_prompt": "You are careful.",
+            "temperature": 0.0,
+            "max_tokens": 256,
+            "generation_seed": 7,
+        }
+        assert EvaluationConfig.from_dict(json.loads(json.dumps(d))) == cfg
+
+    def test_payload_without_the_fields_loads(self) -> None:
+        """Reports and checkpoints written before B1 still load."""
+        d = _config().to_dict()
+        for name in _PROMPT_FIELDS:
+            del d[name]
+        assert EvaluationConfig.from_dict(d) == _config()
+
+    @pytest.mark.parametrize(
+        "template",
+        ["{question}", "{labels}: {question}", "{{literal}} {question}"],
+    )
+    def test_valid_templates(self, template: str) -> None:
+        assert _config(prompt_template=template).prompt_template == template
+
+    @pytest.mark.parametrize(
+        ("template", "match"),
+        [
+            ("Answer with one of {labels}.", r"must contain a \{question\}"),
+            ("{question} {answer}", r"unknown placeholder\(s\) \['answer'\]"),
+            ("{question} {}", r"unknown placeholder\(s\) \[''\]"),
+            ("{question.upper}", r"unknown placeholder"),
+            ('{question} {"a": 1}', r"unknown placeholder"),
+            ("{question", "not a valid template"),
+        ],
+    )
+    def test_invalid_templates_rejected(self, template: str, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            _config(prompt_template=template)
+
+    @pytest.mark.parametrize("temperature", [0.0, 0.7, 2.0])
+    def test_temperature_in_range(self, temperature: float) -> None:
+        assert _config(temperature=temperature).temperature == temperature
+
+    @pytest.mark.parametrize("temperature", [-0.1, 2.1, float("nan")])
+    def test_temperature_out_of_range_rejected(self, temperature: float) -> None:
+        with pytest.raises(ValidationError, match="temperature"):
+            _config(temperature=temperature)
+
+    def test_max_tokens_below_one_rejected(self) -> None:
+        with pytest.raises(ValidationError, match=r"max_tokens must be >= 1"):
+            _config(max_tokens=0)
+
+
+class TestGenerationParams:
+    def test_defaults_are_none(self) -> None:
+        params = GenerationParams()
+        assert (params.temperature, params.max_tokens, params.seed) == (
+            None,
+            None,
+            None,
+        )
+
+    def test_frozen(self) -> None:
+        with pytest.raises(AttributeError):
+            GenerationParams().temperature = 0.0  # type: ignore[misc]
+
+
 # --- EvaluationReport tests ---
 
 
@@ -1305,8 +1408,10 @@ class TestPublicAPI:
     def test_public_api_imports(self) -> None:
         """All types are importable from llm_consistency."""
         public_names = [
+            "DEFAULT_PROMPT_TEMPLATE",
             "EvaluationConfig",
             "EvaluationReport",
+            "GenerationParams",
             "KNOWN_SCORERS",
             "LLMResponse",
             "MCOption",

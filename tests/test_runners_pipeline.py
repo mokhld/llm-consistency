@@ -1,13 +1,16 @@
 """Pipeline semantics shared by BatchRunner, StreamingRunner and CIRunner.
 
-Covers per-variant scoring (review item A1), provider error handling (A2,
-A22) and question-level concurrency (A9).
+Covers per-variant scoring (review item A1), the prompt contract and
+decoding settings (B1), provider error handling (A2, A22) and
+question-level concurrency (A9).
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,11 +18,21 @@ import pytest
 from llm_consistency.datasets import CustomDataset
 from llm_consistency.providers import BudgetExceededError
 from llm_consistency.providers._mock import MockLLMProvider
-from llm_consistency.runners import BatchRunner, CIRunner, StreamingRunner
-from llm_consistency.runners._pipeline import describe_error, presented_options
+from llm_consistency.runners import (
+    DEFAULT_PROMPT_TEMPLATE,
+    BatchRunner,
+    CIRunner,
+    StreamingRunner,
+)
+from llm_consistency.runners._pipeline import (
+    describe_error,
+    presented_options,
+    query_kwargs,
+)
 from llm_consistency.scoring import ExactMatchScorer
 from llm_consistency.types import (
     EvaluationConfig,
+    GenerationParams,
     LLMResponse,
     MCOption,
     MCQuestion,
@@ -28,7 +41,11 @@ from llm_consistency.types import (
     PerturbedVariant,
     QuestionConsistencyResult,
 )
-from prompt_aware_providers import OracleProvider, PositionBiasedProvider
+from prompt_aware_providers import (
+    OracleProvider,
+    PositionBiasedProvider,
+    ProseOracleProvider,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -157,6 +174,21 @@ class TestOracleScoresPerfectly:
             assert qcr.total_variants == 7
             assert all(sr.is_correct for sr in qcr.scored_responses)
 
+    @pytest.mark.parametrize("types", _TYPE_SETS, ids=_TYPE_IDS)
+    async def test_answer_line_after_reasoning(
+        self, types: tuple[PerturbationType, ...]
+    ) -> None:
+        """ "Answer: X" after prose that names a wrong option first."""
+        report = await BatchRunner().run(
+            CustomDataset(list(_QUESTIONS)),
+            _config(*types),
+            ProseOracleProvider(_QUESTIONS),
+            ExactMatchScorer(),
+        )
+        for qcr in report.results:
+            assert qcr.rc_correct == 1.0, qcr
+            assert qcr.rc_agree == 1.0, qcr
+
 
 class TestPositionBiasedAgreement:
     """Always answering the first listed option is not consistent content."""
@@ -230,6 +262,138 @@ class TestPresentedOptionsFallback:
 
 
 # ---------------------------------------------------------------------------
+# Prompt contract and decoding settings (B1)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingProvider(MockLLMProvider):
+    """Answers "A" and records each prompt with the keyword arguments sent."""
+
+    def __init__(self) -> None:
+        super().__init__(model="mock")
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+    async def query(  # type: ignore[override]
+        self, prompt: str, question_id: str, **kwargs: object
+    ) -> LLMResponse:
+        self.calls.append((question_id, prompt, kwargs))
+        return await super().query(prompt, question_id)
+
+
+def _instruction(labels: str) -> str:
+    """The default template's text after ``{question}``, for *labels*."""
+    return DEFAULT_PROMPT_TEMPLATE.split("{question}", 1)[1].format(labels=labels)
+
+
+async def _run_recorded(
+    config: EvaluationConfig, runner_kind: str = "batch"
+) -> _RecordingProvider:
+    provider = _RecordingProvider()
+    dataset = CustomDataset(list(_QUESTIONS))
+    if runner_kind == "batch":
+        await BatchRunner().run(dataset, config, provider, ExactMatchScorer())
+    else:
+        await _collect(
+            StreamingRunner().run_stream(dataset, config, provider, ExactMatchScorer())
+        )
+    return provider
+
+
+class TestPromptContract:
+    @pytest.mark.parametrize("pt", _BUILTIN_TYPES, ids=lambda pt: pt.value)
+    async def test_default_prompt_asks_for_an_answer_line(
+        self, pt: PerturbationType
+    ) -> None:
+        """Every prompt ends with the instruction and the labels it shows."""
+        provider = await _run_recorded(_config(pt))
+        by_id = {q.id: q for q in _QUESTIONS}
+        label_lists: set[str] = set()
+        for qid, prompt, _ in provider.calls:
+            question = by_id[qid.rsplit("_v", 1)[0]]
+            assert prompt.startswith(question.stem)
+            n = len(question.options)
+            numbered = re.search(r"^1\. ", prompt, re.MULTILINE) is not None
+            labels = ", ".join(
+                [str(i + 1) for i in range(n)] if numbered else "ABCDE"[:n]
+            )
+            assert prompt.endswith(_instruction(labels)), prompt
+            label_lists.add(labels)
+        if pt is PerturbationType.FORMAT_CHANGE:
+            assert {"1, 2, 3, 4", "1, 2, 3, 4, 5"} <= label_lists
+        assert {"A, B, C, D", "A, B, C, D, E"} <= label_lists
+
+    async def test_custom_template(self) -> None:
+        config = dataclasses.replace(
+            _config(num_variants=1),
+            prompt_template="Q: {question}\nReply with one of {labels} only.",
+        )
+        provider = await _run_recorded(config)
+        _, prompt, _ = provider.calls[0]
+        assert prompt.startswith(f"Q: {_QUESTIONS[0].stem}\nA. ")
+        assert prompt.endswith("\nReply with one of A, B, C, D only.")
+
+    async def test_bare_template_sends_the_question_alone(self) -> None:
+        config = dataclasses.replace(
+            _config(PerturbationType.SEPARATOR_CHANGE, num_variants=1),
+            prompt_template="{question}",
+        )
+        provider = await _run_recorded(config)
+        _, prompt, _ = provider.calls[0]
+        assert prompt.startswith(_QUESTIONS[0].stem)
+        assert "Answer" not in prompt
+
+
+class TestQueryArguments:
+    """System prompt and generation settings reach provider.query."""
+
+    @pytest.mark.parametrize("runner_kind", ["batch", "stream"])
+    async def test_sent_when_set(self, runner_kind: str) -> None:
+        config = dataclasses.replace(
+            _config(num_variants=2),
+            system_prompt="Be careful.",
+            temperature=0.0,
+            max_tokens=64,
+            generation_seed=7,
+        )
+        provider = await _run_recorded(config, runner_kind)
+        expected = {
+            "system": "Be careful.",
+            "generation": GenerationParams(temperature=0.0, max_tokens=64, seed=7),
+        }
+        assert provider.calls
+        assert all(kwargs == expected for _, _, kwargs in provider.calls)
+
+    async def test_nothing_extra_sent_by_default(self) -> None:
+        provider = await _run_recorded(_config(num_variants=2))
+        assert all(kwargs == {} for _, _, kwargs in provider.calls)
+
+    def test_zero_temperature_counts_as_set(self) -> None:
+        config = dataclasses.replace(_config(), temperature=0.0)
+        assert query_kwargs(config) == {"generation": GenerationParams(temperature=0.0)}
+
+    async def test_query_override_without_the_keywords_still_works(self) -> None:
+        """A provider written before B1 runs unchanged when nothing is set."""
+
+        class _OldProvider(MockLLMProvider):
+            async def query(  # type: ignore[override]
+                self, prompt: str, question_id: str
+            ) -> LLMResponse:
+                return await super().query(prompt, question_id)
+
+        report = await BatchRunner().run(
+            CustomDataset([_simple_question("q0")]),
+            _config(num_variants=2),
+            _OldProvider(model="mock"),
+            ExactMatchScorer(),
+        )
+        (qcr,) = report.results
+        assert qcr.total_variants == 2
+        assert not any(
+            sr.scoring_method.startswith("error:") for sr in qcr.scored_responses
+        )
+
+
+# ---------------------------------------------------------------------------
 # Provider errors (A2, A22)
 # ---------------------------------------------------------------------------
 
@@ -248,12 +412,15 @@ class _ScriptedProvider(MockLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         self.queried_ids.append(question_id)
         error = self.errors.get(question_id.rsplit("_v", 1)[0])
         if error is not None:
             raise error
-        return await super().query(prompt, question_id, system=system)
+        return await super().query(
+            prompt, question_id, system=system, generation=generation
+        )
 
 
 def _budget_error() -> BudgetExceededError:
@@ -297,7 +464,12 @@ class TestBudgetExceededPropagates:
 
         class _Provider(MockLLMProvider):
             async def query(
-                self, prompt: str, question_id: str, *, system: str | None = None
+                self,
+                prompt: str,
+                question_id: str,
+                *,
+                system: str | None = None,
+                generation: GenerationParams | None = None,
             ) -> LLMResponse:
                 started.append(question_id)
                 if question_id == "q0_v0":
@@ -540,7 +712,12 @@ class _TrackingProvider(MockLLMProvider):
         self.peak = 0
 
     async def query(
-        self, prompt: str, question_id: str, *, system: str | None = None
+        self,
+        prompt: str,
+        question_id: str,
+        *,
+        system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
@@ -548,7 +725,9 @@ class _TrackingProvider(MockLLMProvider):
             await asyncio.sleep(0.05 if question_id.startswith("q0_") else 0.005)
         finally:
             self.in_flight -= 1
-        return await super().query(prompt, question_id, system=system)
+        return await super().query(
+            prompt, question_id, system=system, generation=generation
+        )
 
 
 class _FakeProgress:
@@ -645,7 +824,12 @@ class TestQuestionConcurrency:
 
         class _Provider(MockLLMProvider):
             async def query(
-                self, prompt: str, question_id: str, *, system: str | None = None
+                self,
+                prompt: str,
+                question_id: str,
+                *,
+                system: str | None = None,
+                generation: GenerationParams | None = None,
             ) -> LLMResponse:
                 if not question_id.startswith("q0_"):
                     in_flight.add(question_id)
@@ -653,7 +837,9 @@ class TestQuestionConcurrency:
                         await asyncio.Event().wait()  # never answers
                     finally:
                         in_flight.discard(question_id)
-                return await super().query(prompt, question_id, system=system)
+                return await super().query(
+                    prompt, question_id, system=system, generation=generation
+                )
 
         stream = StreamingRunner().run_stream(
             CustomDataset([_simple_question(f"q{i}") for i in range(8)]),

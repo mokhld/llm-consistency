@@ -14,7 +14,7 @@ Guidance for working in the `llm-consistency` repository, a Python implementatio
 ## Codebase map
 
 `src/llm_consistency/`:
-- `types.py`: frozen dataclasses with `to_dict`/`from_dict`. These are `MCQuestion`, `MCOption`, `PresentedOption` (adds `original_label`), `PerturbedVariant` (with `presented_options`), `LLMResponse`, `ScoredResponse`, `QuestionConsistencyResult` (validated), `EvaluationConfig` (validated; `min_mca` is the CI pass target), and `EvaluationReport`. It also holds the `KNOWN_SCORERS` constant.
+- `types.py`: frozen dataclasses with `to_dict`/`from_dict`. These are `MCQuestion`, `MCOption`, `PresentedOption` (adds `original_label`), `PerturbedVariant` (with `presented_options`), `LLMResponse`, `ScoredResponse`, `QuestionConsistencyResult` (validated), `EvaluationConfig` (validated; `min_mca` is the CI pass target; also holds the prompt template, system prompt and decoding settings), and `EvaluationReport`. It also holds `GenerationParams` (not serialized) and the `KNOWN_SCORERS` constant.
 - `perturbations.py`: the `BasePerturbation` ABC, the three built-ins, and a registry keyed by `PerturbationType.value`. Every built-in sets `presented_options`. The numbered format template presents labels "1".."n". `option_reorder` enumerates permutations only when there are 7 options or fewer; otherwise it samples.
 - `scoring.py`: `_extract_mc_answer`, a cascading regex. It is case-sensitive unless the whole output is one character, takes the last "Answer: X", skips negated labels, and accepts numeric labels. It also holds `ExactMatchScorer`, `CustomScorerAdapter`, and `get_scorer` (only `exact_match`).
 - `metrics.py`: pure functions. There are the paper metrics (`mca`, `car_curve`, `core_index` = AUCAR x norm-DTW, `agreement_gated_accuracy`), BCa/percentile bootstrap with a closed-form jackknife in the built-in `*_with_ci`, `compare_mca_paired` (exact McNemar), `validate_sample_size`, and `perturbation_impact`.
@@ -57,7 +57,7 @@ Data flow: dataset -> `generate_variants_for_question` -> `render_prompt` -> `pr
 - **Test providers:** `MockLLMProvider` ignores the prompt, so it cannot catch scoring bugs. Use `tests/prompt_aware_providers.py` (`OracleProvider`, `PositionBiasedProvider`), which parse the rendered prompt. A correct model must score RC_correct == 1.0 under every perturbation.
 - **SDK tests:** provider tests mock the SDK modules. `tests/test_providers_sdk_errors.py` exercises the real SDK error mapping and uses `importorskip`, so it is skipped in the default `.venv` and runs in CI.
 - **mypy and numpy:** `pyproject.toml` skips following into numpy, because its stubs use 3.12 syntax that mypy rejects under `python_version = "3.11"` once the extras are installed.
-- **The prompt today:** it is the bare stem plus options, with no answer instruction and no temperature control. Backlog B1 adds both.
+- **Prompt contract:** `render_prompt` puts each variant in `config.prompt_template`, or `DEFAULT_PROMPT_TEMPLATE` (`runners/_pipeline.py`), which asks for `Answer: X` on the first line with the presented labels. Decoding settings default to None, meaning not sent. `process_question` passes `system=` and `generation=` to `provider.query` only when set, and `BaseLLMProvider` passes `generation=` to `_send_request` only when set, so older overrides keep working. anthropic 1.x has no `temperature` argument, so the Anthropic provider sends it in `extra_body`.
 
 ## Working Principles
 

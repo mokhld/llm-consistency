@@ -14,7 +14,7 @@ from llm_consistency.cli import cli
 from llm_consistency.providers import BudgetExceededError
 from llm_consistency.providers._mock import MockLLMProvider
 from llm_consistency.runners import BatchRunner
-from llm_consistency.types import LLMResponse
+from llm_consistency.types import GenerationParams, LLMResponse
 
 
 def _create_mc_dataset(tmp_path: Path) -> Path:
@@ -772,7 +772,12 @@ class _OverBudgetProvider(MockLLMProvider):
     """Mock provider whose every query trips the budget cap."""
 
     async def query(
-        self, prompt: str, question_id: str, *, system: str | None = None
+        self,
+        prompt: str,
+        question_id: str,
+        *,
+        system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         raise BudgetExceededError(spent=0.01, estimated=0.005, limit=0.01)
 
@@ -1021,12 +1026,19 @@ def test_ci_fails_when_variants_error(
 ) -> None:
     class _Broken(MockLLMProvider):
         async def query(
-            self, prompt: str, question_id: str, *, system: str | None = None
+            self,
+            prompt: str,
+            question_id: str,
+            *,
+            system: str | None = None,
+            generation: GenerationParams | None = None,
         ) -> LLMResponse:
             if "Question 1?" in prompt:
                 msg = "simulated outage"
                 raise RuntimeError(msg)
-            return await super().query(prompt, question_id, system=system)
+            return await super().query(
+                prompt, question_id, system=system, generation=generation
+            )
 
     monkeypatch.setattr(
         cli_module, "get_provider", lambda _n, **kw: _Broken(model=kw["model"])
@@ -1418,3 +1430,331 @@ def test_report_file_stems() -> None:
     assert cli_module._report_file_stems(
         ["openai/gpt-4o", "GPT-4o", "gpt-4o", "a b:c", "...", "gpt-4o-2"]
     ) == ["openai_gpt-4o", "GPT-4o", "gpt-4o-2", "a_b_c", "model", "gpt-4o-2-2"]
+
+
+# ---------------------------------------------------------------------------
+# Prompt and decoding settings (B1)
+# ---------------------------------------------------------------------------
+
+_B1_FLAGS = [
+    "--prompt-template",
+    "--system-prompt",
+    "--temperature",
+    "--max-tokens",
+    "--generation-seed",
+]
+
+
+class _RecordingProvider(MockLLMProvider):
+    """Mock provider that records the keyword arguments of each query."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.query_kwargs: list[dict[str, Any]] = []
+
+    async def query(  # type: ignore[override]
+        self, prompt: str, question_id: str, **kwargs: Any
+    ) -> LLMResponse:
+        self.query_kwargs.append(kwargs)
+        return await super().query(prompt, question_id)
+
+
+def _record_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[dict[str, Any]], list[_RecordingProvider]]:
+    """Replace get_provider; return its call kwargs and the providers built."""
+    calls: list[dict[str, Any]] = []
+    built: list[_RecordingProvider] = []
+
+    def fake(name: str, **kwargs: Any) -> _RecordingProvider:
+        calls.append({"name": name, **kwargs})
+        built.append(_RecordingProvider(model=kwargs["model"]))
+        return built[-1]
+
+    monkeypatch.setattr(cli_module, "get_provider", fake)
+    return calls, built
+
+
+def _b1_config(report_path: Path) -> dict[str, Any]:
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    return {
+        key: data["config"][key]
+        for key in (
+            "prompt_template",
+            "system_prompt",
+            "temperature",
+            "max_tokens",
+            "generation_seed",
+        )
+    }
+
+
+def test_run_help_lists_prompt_and_decoding_flags() -> None:
+    result = CliRunner().invoke(cli, ["run", "--help"])
+    assert result.exit_code == 0
+    for flag in _B1_FLAGS:
+        assert flag in result.output
+
+
+def test_prompt_and_decoding_flags_reach_config_and_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, built = _record_provider(monkeypatch)
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "m",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--prompt-template",
+            "{question}\nOne of {labels}.",
+            "--system-prompt",
+            "Be careful.",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "64",
+            "--generation-seed",
+            "7",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert _b1_config(out_path) == {
+        "prompt_template": "{question}\nOne of {labels}.",
+        "system_prompt": "Be careful.",
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "generation_seed": 7,
+    }
+    # Generation settings go with each query, not into the provider constructor.
+    assert calls == [
+        {
+            "name": "mock",
+            "model": "m",
+            "max_budget_usd": None,
+            "requests_per_minute": 60,
+        }
+    ]
+    expected = {
+        "system": "Be careful.",
+        "generation": GenerationParams(temperature=0.0, max_tokens=64, seed=7),
+    }
+    assert built[0].query_kwargs
+    assert all(kwargs == expected for kwargs in built[0].query_kwargs)
+
+
+def test_prompt_and_decoding_default_to_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, built = _record_provider(monkeypatch)
+    dataset_path = _create_mc_dataset(tmp_path)
+    out_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        cli,
+        ["run", "-m", "m", "-p", "mock", "-d", str(dataset_path), "-o", str(out_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert set(_b1_config(out_path).values()) == {None}
+    assert all(kwargs == {} for kwargs in built[0].query_kwargs)
+
+
+@pytest.mark.parametrize("section", [True, False], ids=["run-section", "flat"])
+def test_prompt_and_decoding_config_keys(tmp_path: Path, section: bool) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    keys = (
+        "model: m\n"
+        "provider: mock\n"
+        "prompt_template: |\n"
+        "  {question}\n"
+        "  Reply with one of {labels}.\n"
+        "system_prompt: Be careful.\n"
+        "temperature: 0\n"
+        "max_tokens: 64\n"
+        "generation_seed: 7\n"
+    )
+    if section:
+        keys = "run:\n" + "".join(f"  {line}\n" for line in keys.splitlines())
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text(keys)
+    out_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        cli,
+        ["run", "-c", str(config_path), "-d", str(dataset_path), "-o", str(out_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert _b1_config(out_path) == {
+        "prompt_template": "{question}\nReply with one of {labels}.\n",
+        "system_prompt": "Be careful.",
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "generation_seed": 7,
+    }
+
+
+def test_prompt_and_decoding_precedence(tmp_path: Path) -> None:
+    """CLI flag beats the config file, which beats the default."""
+    dataset_path = _create_mc_dataset(tmp_path)
+    config_path = tmp_path / "eval.toml"
+    config_path.write_text(
+        '[run]\nmodel = "m"\nprovider = "mock"\n'
+        'system_prompt = "From config."\ntemperature = 0.5\nmax_tokens = 100\n'
+    )
+    out_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-c",
+            str(config_path),
+            "-d",
+            str(dataset_path),
+            "-o",
+            str(out_path),
+            "--temperature",
+            "0",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert _b1_config(out_path) == {
+        "prompt_template": None,
+        "system_prompt": "From config.",
+        "temperature": 0.0,
+        "max_tokens": 100,
+        "generation_seed": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("args", "config", "message"),
+    [
+        (["--temperature", "2.5"], "", "--temperature"),
+        (["--max-tokens", "0"], "", "--max-tokens"),
+        ([], "temperature: 3\n", "--temperature"),
+        (["--prompt-template", "no placeholder"], "", "{question} placeholder"),
+        (["--prompt-template", "{question} {answer}"], "", "unknown placeholder"),
+    ],
+)
+def test_invalid_prompt_and_decoding_values_rejected(
+    tmp_path: Path, args: list[str], config: str, message: str
+) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    config_path = tmp_path / "eval.yaml"
+    config_path.write_text(f"model: m\nprovider: mock\n{config}")
+    result = CliRunner().invoke(
+        cli,
+        ["run", "-c", str(config_path), "-d", str(dataset_path), "--dry-run", *args],
+    )
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+def test_dry_run_prints_default_prompt_and_settings(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["run", "-m", "m", "-p", "mock", "-d", str(dataset_path), "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "  temperature:         not sent (provider default)" in result.output
+    assert "  max tokens:          not sent (provider default)" in result.output
+    assert "  generation seed:     not sent (provider default)" in result.output
+    assert "System prompt: none" in result.output
+    # The one reordering of a 2-option question, then the instruction.
+    assert (
+        "  What is 1+1?\n  A. 2\n  B. 1\n  \n"
+        "  Answer with the label of the correct option. The first line of your "
+        'response must be "Answer: X", where X is one of A, B.\n'
+    ) in result.output
+
+
+def test_dry_run_prints_custom_prompt_and_settings(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "-m",
+            "m",
+            "-p",
+            "mock",
+            "-d",
+            str(dataset_path),
+            "--dry-run",
+            "--perturbations",
+            "format_change",
+            "--num-variants",
+            "7",
+            "--prompt-template",
+            "{question}\nLabels: {labels}",
+            "--system-prompt",
+            "Line one.\nLine two.",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "64",
+            "--generation-seed",
+            "7",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "  temperature:         0.0\n" in result.output
+    assert "  max tokens:          64\n" in result.output
+    assert "  generation seed:     7\n" in result.output
+    assert "System prompt:\n  Line one.\n  Line two.\n" in result.output
+    # format_change variant 0 is the dot layout.
+    assert "  What is 1+1?\n  A. 1\n  B. 2\n  Labels: A, B\n" in result.output
+
+
+def test_compare_reads_prompt_and_decoding_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, built = _record_provider(monkeypatch)
+    dataset_path = _create_mc_dataset(tmp_path)
+    config_path = tmp_path / "compare.yaml"
+    config_path.write_text(
+        "models:\n  - {model: a, provider: mock}\n  - {model: b, provider: mock}\n"
+        f"dataset: {dataset_path}\n"
+        "prompt_template: '{question} ({labels})'\n"
+        "system_prompt: Be careful.\n"
+        "temperature: 0\n"
+        "max_tokens: 64\n"
+        "generation_seed: 7\n"
+    )
+    out_dir = tmp_path / "out"
+    result = CliRunner().invoke(
+        cli, ["compare", "-c", str(config_path), "-o", str(out_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    for name in ("a.json", "b.json"):
+        assert _b1_config(out_dir / name) == {
+            "prompt_template": "{question} ({labels})",
+            "system_prompt": "Be careful.",
+            "temperature": 0.0,
+            "max_tokens": 64,
+            "generation_seed": 7,
+        }
+    expected = {
+        "system": "Be careful.",
+        "generation": GenerationParams(temperature=0.0, max_tokens=64, seed=7),
+    }
+    assert all(kw == expected for prov in built for kw in prov.query_kwargs)
+
+
+def test_compare_rejects_invalid_temperature(tmp_path: Path) -> None:
+    dataset_path = _create_mc_dataset(tmp_path)
+    config_path = tmp_path / "compare.yaml"
+    config_path.write_text(
+        "models:\n  - {model: a, provider: mock}\n"
+        f"dataset: {dataset_path}\ntemperature: 2.5\n"
+    )
+    result = CliRunner().invoke(cli, ["compare", "-c", str(config_path)])
+    assert result.exit_code == 1
+    assert "temperature must be between 0.0 and 2.0" in result.output

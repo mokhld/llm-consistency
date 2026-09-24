@@ -7,6 +7,8 @@ rendered prompt and answer with the label printed next to it:
 * :class:`OracleProvider` answers the label of the correct option text, so a
   correct pipeline scores it RC_correct == RC_agree == 1.0 under every
   perturbation.
+* :class:`ProseOracleProvider` gives the same answer as "Answer: X" after
+  reasoning text that names a wrong option first.
 * :class:`PositionBiasedProvider` answers the label of the first option
   listed, so its answers change content whenever the options are reordered.
 """
@@ -21,6 +23,8 @@ from llm_consistency.types import LLMResponse, MCQuestion
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from llm_consistency.types import GenerationParams
 
 
 def _find_option(prompt: str, text: str) -> re.Match[str]:
@@ -53,6 +57,7 @@ class _PromptAwareProvider(MockLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         # Runners send variant ids of the form "<question id>_v<index>".
         question = self._questions[question_id.rsplit("_v", 1)[0]]
@@ -71,6 +76,18 @@ class OracleProvider(_PromptAwareProvider):
     def _answer(self, prompt: str, question: MCQuestion) -> str:
         correct = next(o.text for o in question.options if o.is_correct)
         return _find_option(prompt, correct).group(1)
+
+
+class ProseOracleProvider(OracleProvider):
+    """Reasons about a wrong option first, then states "Answer: X" last."""
+
+    def _answer(self, prompt: str, question: MCQuestion) -> str:
+        wrong = next(o.text for o in question.options if not o.is_correct)
+        wrong_label = _find_option(prompt, wrong).group(1)
+        return (
+            f"Option {wrong_label} looks plausible, but it does not fit the "
+            f"question.\n\nAnswer: {super()._answer(prompt, question)}"
+        )
 
 
 class PositionBiasedProvider(_PromptAwareProvider):

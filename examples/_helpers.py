@@ -11,7 +11,7 @@ examples can stay terse: ``{"q1": "B", "q2": "C", ...}``.
 
 from __future__ import annotations
 
-from llm_consistency import LLMResponse
+from llm_consistency import GenerationParams, LLMResponse
 from llm_consistency.providers._mock import MockLLMProvider
 
 
@@ -24,6 +24,9 @@ class BaseIdMockProvider(MockLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> LLMResponse:
         base_qid = question_id.split("_v")[0]
-        return await super().query(prompt, base_qid, system=system)
+        return await super().query(
+            prompt, base_qid, system=system, generation=generation
+        )

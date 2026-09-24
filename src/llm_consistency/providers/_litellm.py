@@ -9,7 +9,7 @@ gracefully with a clear installation hint.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from llm_consistency.providers._base import (
     BaseLLMProvider,
@@ -17,6 +17,9 @@ from llm_consistency.providers._base import (
     _RawResponse,
 )
 from llm_consistency.providers._retry import is_retryable_status, parse_retry_after
+
+if TYPE_CHECKING:
+    from llm_consistency.types import GenerationParams
 
 
 class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
@@ -74,13 +77,15 @@ class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         """Send a single request via ``litellm.acompletion()``.
 
         LiteLLM returns OpenAI-compatible responses with
         ``response.choices[0].message.content`` and
         ``response.usage`` attributes.  A refusal is returned as the
-        content.
+        content.  Generation settings that are set are sent as
+        ``temperature``, ``max_tokens`` and ``seed``.
 
         Raises:
             EmptyResponseError: If the output token limit was reached
@@ -91,10 +96,20 @@ class LiteLLMProvider(BaseLLMProvider):  # pragma: no cover
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        options: dict[str, Any] = {}
+        if generation is not None:
+            if generation.temperature is not None:
+                options["temperature"] = generation.temperature
+            if generation.max_tokens is not None:
+                options["max_tokens"] = generation.max_tokens
+            if generation.seed is not None:
+                options["seed"] = generation.seed
+
         t0 = time.monotonic()
         response = await self._litellm.acompletion(
             model=self._model,
             messages=messages,
+            **options,
         )
         latency_ms = (time.monotonic() - t0) * 1000
 

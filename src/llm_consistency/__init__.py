@@ -59,6 +59,7 @@ from llm_consistency.reports import (
     render_car_ascii,
 )
 from llm_consistency.runners import (
+    DEFAULT_PROMPT_TEMPLATE,
     BatchRunner,
     CIRunner,
     RunMetadata,
@@ -74,6 +75,7 @@ from llm_consistency.types import (
     KNOWN_SCORERS,
     EvaluationConfig,
     EvaluationReport,
+    GenerationParams,
     LLMResponse,
     MCOption,
     MCQuestion,
@@ -88,6 +90,7 @@ from llm_consistency.types import (
 )
 
 __all__ = [
+    "DEFAULT_PROMPT_TEMPLATE",
     "KNOWN_SCORERS",
     "BaseDataset",
     "BaseLLMProvider",
@@ -105,6 +108,7 @@ __all__ = [
     "EvaluationReport",
     "ExactMatchScorer",
     "FormatChangePerturbation",
+    "GenerationParams",
     "LLMConsistencyError",
     "LLMResponse",
     "MCDataset",

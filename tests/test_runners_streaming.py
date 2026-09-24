@@ -11,6 +11,7 @@ from llm_consistency.providers._mock import MockLLMProvider
 from llm_consistency.scoring import ExactMatchScorer
 from llm_consistency.types import (
     EvaluationConfig,
+    GenerationParams,
     MCOption,
     MCQuestion,
     OpenEndedQuestion,
@@ -186,6 +187,7 @@ class _FailingProvider(MockLLMProvider):
         question_id: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> object:
         msg = f"simulated provider failure for {question_id}"
         raise RuntimeError(msg)

@@ -26,6 +26,7 @@ from llm_consistency.reports import ConsoleReporter, export_json
 from llm_consistency.runners import BatchRunner, CIRunner
 from llm_consistency.runners._pipeline import (
     generate_variants_for_question,
+    presented_options,
     render_prompt,
 )
 from llm_consistency.scoring import get_scorer
@@ -53,6 +54,11 @@ _COMPARE_KEYS = frozenset(
         "core_threshold",
         "max_budget_usd",
         "rpm",
+        "prompt_template",
+        "system_prompt",
+        "temperature",
+        "max_tokens",
+        "generation_seed",
     }
 )
 
@@ -191,6 +197,8 @@ def _dry_run_report(
     most ``num_variants`` per question, and fewer when it has fewer
     distinct variants (for example, a 2-option question has one
     reordering). Warns when the estimate exceeds ``max_budget_usd``.
+    Ends with the generation settings, the system prompt and the full
+    prompt for the first variant, as they will be sent.
     """
     mc_questions = [q for q in dataset if isinstance(q, MCQuestion)]
     if not mc_questions:
@@ -202,7 +210,8 @@ def _dry_run_report(
     if not variants:
         msg = "Pipeline produced zero variants for the first question."
         raise click.ClickException(msg)
-    sample_prompt = render_prompt(variants[0])
+    labels = [o.label for o in presented_options(variants[0], sample)]
+    sample_prompt = render_prompt(variants[0], config.prompt_template, labels)
 
     num_questions = len(mc_questions)
     num_calls = sum(
@@ -229,6 +238,9 @@ def _dry_run_report(
         click.echo(f"  budget:              ${config.max_budget_usd:.4f}")
     click.echo(f"  provider class:      {type(provider).__name__}")
     click.echo(f"  scorer class:        {type(scorer).__name__}")
+    click.echo(f"  temperature:         {_setting(config.temperature)}")
+    click.echo(f"  max tokens:          {_setting(config.max_tokens)}")
+    click.echo(f"  generation seed:     {_setting(config.generation_seed)}")
     if config.max_budget_usd is not None and estimated_usd > config.max_budget_usd:
         click.echo(
             f"Warning: the estimated cost (~${estimated_usd:.4f}) exceeds "
@@ -236,8 +248,19 @@ def _dry_run_report(
             "stop with an error when the budget is reached."
         )
     click.echo("")
+    if config.system_prompt is None:
+        click.echo("System prompt: none")
+    else:
+        click.echo("System prompt:")
+        click.echo("  " + config.system_prompt.replace("\n", "\n  "))
+    click.echo("")
     click.echo("Sample prompt (variant 0 of first question):")
     click.echo("  " + sample_prompt.replace("\n", "\n  "))
+
+
+def _setting(value: float | None) -> str:
+    """Format a generation setting for the dry-run summary."""
+    return "not sent (provider default)" if value is None else str(value)
 
 
 def _export_report(
@@ -376,6 +399,44 @@ def cli(ctx: click.Context) -> None:
     help="Provider rate limit in requests per minute (>=1)",
 )
 @click.option(
+    "--prompt-template",
+    default=None,
+    help=(
+        "Prompt template. {question} (required) is replaced by the question "
+        "and options, {labels} by the option labels shown. Default: the "
+        'question plus an instruction to answer on the first line as "Answer: X"'
+    ),
+)
+@click.option(
+    "--system-prompt",
+    default=None,
+    help="System prompt sent with every request",
+)
+@click.option(
+    "--temperature",
+    type=click.FloatRange(min=0.0, max=2.0),
+    default=None,
+    help=(
+        "Sampling temperature (0.0-2.0). Not sent when unset, so the "
+        "provider default applies"
+    ),
+)
+@click.option(
+    "--max-tokens",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Maximum output tokens per response (>=1). Not sent when unset",
+)
+@click.option(
+    "--generation-seed",
+    type=int,
+    default=None,
+    help=(
+        "Provider sampling seed, separate from --seed. Not sent when unset; "
+        "Anthropic ignores it"
+    ),
+)
+@click.option(
     "--ci",
     is_flag=True,
     help=(
@@ -408,6 +469,11 @@ def run(
     core_threshold: float | None,
     max_budget_usd: float | None,
     rpm: int,
+    prompt_template: str | None,
+    system_prompt: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    generation_seed: int | None,
     ci: bool,
     dry_run: bool,
 ) -> None:
@@ -428,6 +494,11 @@ def run(
         min_mca=min_mca,
         core_threshold=core_threshold,
         ci_mode=ci,
+        prompt_template=prompt_template,
+        system_prompt=system_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        generation_seed=generation_seed,
     )
 
     prov = get_provider(
@@ -598,6 +669,11 @@ def _compare_runs(
     if rpm < 1:
         msg = "Config error: 'rpm' must be >= 1"
         raise click.ClickException(msg)
+    template_raw = data.get("prompt_template")
+    system_raw = data.get("system_prompt")
+    temperature_raw = data.get("temperature")
+    max_tokens_raw = data.get("max_tokens")
+    generation_seed_raw = data.get("generation_seed")
 
     runs: list[tuple[EvaluationConfig, BaseLLMProvider]] = []
     for entry in models:
@@ -614,6 +690,15 @@ def _compare_runs(
             mca_threshold=mca_threshold,
             min_mca=min_mca,
             core_threshold=core_threshold,
+            prompt_template=str(template_raw) if template_raw is not None else None,
+            system_prompt=str(system_raw) if system_raw is not None else None,
+            temperature=(
+                float(temperature_raw) if temperature_raw is not None else None
+            ),
+            max_tokens=int(max_tokens_raw) if max_tokens_raw is not None else None,
+            generation_seed=(
+                int(generation_seed_raw) if generation_seed_raw is not None else None
+            ),
         )
         prov = get_provider(
             provider_name,

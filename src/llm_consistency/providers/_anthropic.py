@@ -9,8 +9,9 @@ top-level parameter (not in messages), ``input_tokens``/
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from llm_consistency.providers._base import (
     BaseLLMProvider,
@@ -19,6 +20,11 @@ from llm_consistency.providers._base import (
 )
 from llm_consistency.providers._retry import is_retryable_status
 
+if TYPE_CHECKING:
+    from llm_consistency.types import GenerationParams
+
+_logger = logging.getLogger(__name__)
+
 
 class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
     """Anthropic Claude provider.
@@ -26,9 +32,10 @@ class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
     Args:
         model: Model identifier (e.g., ``"claude-sonnet-4-20250514"``).
         api_key: Anthropic API key, or ``None`` to use env default.
-        max_tokens: Maximum tokens per response.  Anthropic requires
-            this on every request.  Defaults to 1024 (sufficient for
-            MC question answers).
+        max_tokens: Maximum tokens per response when the request's
+            generation settings do not set one.  Anthropic requires this
+            on every request.  Defaults to 1024 (sufficient for MC
+            question answers).
         **kwargs: Forwarded to :class:`BaseLLMProvider`.
     """
 
@@ -76,6 +83,7 @@ class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
         prompt: str,
         *,
         system: str | None = None,
+        generation: GenerationParams | None = None,
     ) -> _RawResponse:
         """Send a single messages API request.
 
@@ -84,7 +92,10 @@ class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
         ``input_tokens``/``output_tokens`` to the standard
         ``prompt_tokens``/``completion_tokens`` in :class:`_RawResponse`.
         The content is all text blocks joined; thinking blocks are
-        skipped.
+        skipped.  Generation settings that are set are sent as
+        ``temperature`` (in ``extra_body``, because anthropic 1.x has no
+        temperature argument) and ``max_tokens``.  Anthropic has no seed
+        parameter, so a seed is ignored.
 
         Raises:
             EmptyResponseError: If ``max_tokens`` was reached before any
@@ -97,6 +108,18 @@ class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
         }
         if system is not None:
             create_kwargs["system"] = system
+        if generation is not None:
+            if generation.temperature is not None:
+                # anthropic 1.x dropped the temperature argument, but the API
+                # still accepts it for models before Opus 4.7.
+                create_kwargs["extra_body"] = {"temperature": generation.temperature}
+            if generation.max_tokens is not None:
+                create_kwargs["max_tokens"] = generation.max_tokens
+            if generation.seed is not None:
+                _logger.debug(
+                    "Anthropic has no seed parameter; ignoring generation seed %d",
+                    generation.seed,
+                )
 
         t0 = time.monotonic()
         response = await self._client.messages.create(**create_kwargs)
@@ -110,7 +133,7 @@ class AnthropicProvider(BaseLLMProvider):  # pragma: no cover
         if not content and response.stop_reason == "max_tokens":
             msg = (
                 f"Anthropic model {self._model!r} reached max_tokens "
-                f"({self._max_tokens}) before producing any text"
+                f"({create_kwargs['max_tokens']}) before producing any text"
             )
             raise EmptyResponseError(
                 msg,
